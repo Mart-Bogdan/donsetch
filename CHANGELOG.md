@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Windows: debug builds die with `STATUS_STACK_OVERFLOW` (#18)**: the main thread's stack comes from the PE header — 1MB by default, against Linux's 8MB. DonSeTch runs its whole future tree there via tokio's `block_on`, and `fetch_tool`'s frame does not fit unoptimized: `cargo build` produced a binary that aborted in `__chkstk` before the function body ran. Release fit only because optimization shrank the frame. `build.rs` now requests 8MB (`/STACK` on MSVC, `-Wl,--stack` on MinGW), so the ceiling no longer depends on the build profile.
 
+- **HTTP 304 (cached re-read) reported as `Blocked` at status 200 (#20)**: re-reading the same URL in one long-lived process (the MCP server) failed with `verdict: Blocked, status: 200`, even though the page was fine and the first read of it succeeded. A re-read asks the server "has this changed?", and an unchanged page answers **HTTP 304 Not Modified** with an empty body. Wall detection has no rule for 304, so that empty response scored as `Blocked`; the cached body, status and headers were then merged back in over it, but the verdict was left behind — hence the contradictory `Blocked` at 200. The verdict is now re-scored over the merged body, as the fresh-cache path already did. This hit every read after the first, permanently, for any page served with an ETag but no `Cache-Control` — a large share of static hosting (S3/CloudFront, nginx defaults) — and the resulting `next_action` told agents to retry, which could never work: the 304 is identical every time. The CLI was never affected, since its cache lives and dies with each run.
+
 ## [2.3.6] - 2026-08-19
 
 ### Added
