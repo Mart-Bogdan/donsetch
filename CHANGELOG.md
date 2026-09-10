@@ -130,6 +130,16 @@ channel until the v4.0.0 release train.
 
 ### Fixed
 
+- Default-feature builds compile again: the web-memory receipt in
+  `donsetch status` tested the rerank feature with `cfg!` instead of
+  `#[cfg]`. `cfg!` is a runtime boolean, so the rerank-only arms
+  stayed in the token stream and still had to resolve
+  `crate::memory::{kill_switch, rows, cap}`, which the module gates
+  behind the feature. Every `cargo build` without `rerank` failed
+  with three E0425s; the printed status text is unchanged in both
+  configurations. Also restores the five fuzz targets (extract,
+  charset, feed, sitemap, paginate), which build default-featured
+  and had stopped running.
 - Xvfb reuse gate now demands a bounded real-protocol answer
   (xdpyinfo within 2s) before handing a display to the pool, so a
   SIGKILLed Xvfb's tombstone socket can no longer wedge every
