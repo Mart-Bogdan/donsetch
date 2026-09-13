@@ -34,6 +34,34 @@ channel until the v4.0.0 release train.
   maps each to its config key.
 
 ### Added
+- **Egress fabric (v4 A):** search, crawl, fetch, and ghost share one
+  process-wide proxy pool with durable lane health. Burned and dead
+  lines survive restarts in `egress-health.json` (kill:
+  `DONSETCH_NO_EGRESS_PERSIST`). When a pool is configured, `web_fetch`
+  sticks to one exit per host and rotates on 429 / 407 / connect-dead /
+  timeout; the lane stays pinned for the whole redirect chain (never
+  mid-200-session). Kill: `DONSETCH_NO_FETCH_ROTATE`. Personas get an
+  exclusive lane bind: a burned or foreign-persona exit is never
+  reused for a new mint, and quarantine frees the lane. Per-lane RTT
+  EWMA feeds search pacing and surfaces in `donsetch doctor --deep`
+  as one line per lane (ok / slow / burned / dead / auth) with a named
+  fix. Daemon preflight still benches dead proxies before the first
+  query; crawl skips benched lanes and reports outcomes into the same
+  health world.
+- **Learning engine v2 (v4 B, local only):** per-(engine, intent)
+  search trust EWMAs drive roster order (`search-trust.json` v2; empty
+  intent maps seed every intent from engine-global history so a
+  restart never re-learns a walled engine from zero). Domain profiles
+  stamp which egress class their cookies were learned on; a Warm
+  clearance vault is refused when the live lane is the other class
+  (home-IP cookies never ride a proxy exit). Crawl host ladders
+  (429 storms, robots delays) persist to `crawl-governor.json`
+  (cap ~2k hosts, 7d TTL). `donsetch status` has an **improve** line
+  (warm-hits, walled, cooldowns, flaky, low-trust/quarantined) and
+  `donsetch doctor --improve` explains the loop in ~10 lines with live
+  local receipts and kill switches. No MCP tool, no telemetry, no
+  cross-machine sharing. A 24h soak battery still gates any public
+  improve claim.
 - `just win-check`: type-checks the crate for `x86_64-pc-windows-gnu`
   from Linux (clippy, no linkage), both `--no-default-features` and
   the full feature set, so `#[cfg(windows)]` breakage from a
