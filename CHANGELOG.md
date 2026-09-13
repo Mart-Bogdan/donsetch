@@ -20,6 +20,18 @@ channel until the v4.0.0 release train.
   pack spawned is kept (web_fetch consumes it: a speed win with zero
   new surface).
 
+### Fixed
+- PDF glyph walk no longer panics when the first glyph's font has no
+  PDFium-reportable name (Type3, missing BaseFont, over-long name).
+  The mono-font check now bounds-checks the family index like the
+  sibling dingbat flag; a crafted PDF can no longer abort the process
+  (release `panic = "abort"`) on fetch. (#221)
+- Search syndication dedup keeps punctuation in the title key, so
+  `C++ Tutorial` and `C# Tutorial` (and dotted versions like
+  `Rust 1.75`) no longer collapse into one result and silently drop
+  the other. Only titles that are identical after case/whitespace
+  normalization still dedup. (#222)
+
 ### Changed
 - `donsetch config show` redacts bearer tokens and credential-bearing proxy
   values, including proxy pools, while still showing whether each field is
