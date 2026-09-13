@@ -161,8 +161,7 @@ pub(super) async fn engine_task_with_budget(
             Err((format!("blocked:{}", out.status), egress_id, true)),
         );
     }
-    let hits = engines::parse(&engine, &html);
-    let instant = super::instant::parse_instant(&engine, &html);
+    let (hits, instant) = engines::parse_with_instant(&engine, &html);
     if hits.len() < 3 {
         // Honest "no results" is NOT an engine failure :
         // don't burn trust/lanes for a dry query.
@@ -211,8 +210,7 @@ pub(super) async fn ghost_engine_task(
         }
         Ok(Ok(r)) => r.html,
     };
-    let hits = engines::parse("google_ghost", &rendered);
-    let instant = super::instant::parse_instant("google_ghost", &rendered);
+    let (hits, instant) = engines::parse_with_instant("google_ghost", &rendered);
     let ms = started.elapsed().as_millis() as u64;
     if hits.len() < 3 {
         // 200-but-no-results 2026 Google = bot wall or an AI-mode

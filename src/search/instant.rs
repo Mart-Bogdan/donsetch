@@ -82,12 +82,22 @@ pub fn parse_instant(engine: &str, html: &str) -> Option<InstantAnswer> {
         return None;
     }
     let doc = Html::parse_document(html);
+    parse_instant_doc(engine, &doc)
+}
+
+/// Same as `parse_instant`, on an already-parsed document. The
+/// engine fan-out parses the SERP once and feeds hits + instant
+/// from the same DOM (html5ever is not free on a 3MB page).
+pub fn parse_instant_doc(engine: &str, doc: &Html) -> Option<InstantAnswer> {
+    if !crate::config::cfg().search.serp_instant {
+        return None;
+    }
     match engine {
-        "bing" => parse_bing_instant(&doc, engine),
-        "brave" => parse_brave_instant(&doc, engine),
-        "yahoo" => parse_yahoo_instant(&doc, engine),
-        "google" | "google_ghost" => parse_google_instant(&doc, engine),
-        "mojeek" => parse_mojeek_instant(&doc, engine),
+        "bing" => parse_bing_instant(doc, engine),
+        "brave" => parse_brave_instant(doc, engine),
+        "yahoo" => parse_yahoo_instant(doc, engine),
+        "google" | "google_ghost" => parse_google_instant(doc, engine),
+        "mojeek" => parse_mojeek_instant(doc, engine),
         _ => None,
     }
 }

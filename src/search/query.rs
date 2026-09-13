@@ -126,7 +126,14 @@ pub fn for_engine(c: &CompiledQuery, engine: &str) -> String {
         parts.insert(0, c.text.clone());
     }
     if parts.is_empty() {
-        return c.raw.clone();
+        // Every operator was stripped and there is no free text
+        // (`site:example.com` alone on DDG lite). Degrade to the
+        // site value as a bare term: searching "example.com" is
+        // useful; sending the literal `site:` token is not.
+        if let Some(s) = &c.site {
+            return s.clone();
+        }
+        return c.text.clone();
     }
     parts.join(" ")
 }
@@ -244,6 +251,15 @@ mod tests {
         let ddg = for_engine(&c, "ddg");
         assert!(!ddg.contains("site:"), "ddg must strip: {ddg}");
         assert!(ddg.contains("tokio"));
+    }
+
+    #[test]
+    fn operator_only_query_degrades_to_site_value_on_non_honoring_engines() {
+        let c = compile("site:example.com");
+        let ddg = for_engine(&c, "ddg");
+        assert_eq!(ddg, "example.com", "never send the literal site: token");
+        let bing = for_engine(&c, "bing");
+        assert_eq!(bing, "site:example.com");
     }
 
     #[test]

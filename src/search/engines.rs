@@ -148,6 +148,16 @@ pub(crate) fn is_serp_url(url: &str) -> bool {
 }
 
 pub fn parse(engine: &str, html: &str) -> Vec<Hit> {
+    parse_with_instant(engine, html).0
+}
+
+/// One DOM parse feeds both the organic hit list and the C5
+/// instant layer. html5ever on a multi-MB SERP is the expensive
+/// part; doing it twice per engine was pure waste.
+pub fn parse_with_instant(
+    engine: &str,
+    html: &str,
+) -> (Vec<Hit>, Option<super::instant::InstantAnswer>) {
     let doc = Html::parse_document(html);
     let mut hits = match engine {
         "brave" => parse_brave(&doc),
@@ -168,6 +178,7 @@ pub fn parse(engine: &str, html: &str) -> Vec<Hit> {
     // search.yahoo.com/search pagination links, undecoded
     // r.search.yahoo.com redirects, bing.com/ck/a stubs).
     hits.retain(|h| !is_serp_url(&h.url));
+    let instant = super::instant::parse_instant_doc(engine, &doc);
     if hits.is_empty() && crate::config::cfg().debug.search {
         let dump = std::env::temp_dir().join(format!("donseek_debug_{engine}.html"));
         let dump = dump.to_string_lossy().into_owned();
@@ -177,7 +188,7 @@ pub fn parse(engine: &str, html: &str) -> Vec<Hit> {
             len = html.len()
         );
     }
-    hits
+    (hits, instant)
 }
 
 /// Google URL unwrapping: Google wraps result URLs in

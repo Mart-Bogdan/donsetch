@@ -531,6 +531,7 @@ fn machine_meta(result: &Value, sc: &Value) -> Value {
         "cached",
         "elapsed_ms",
         "provider",
+        "instant",
         "results",
         "engines",
     ];
