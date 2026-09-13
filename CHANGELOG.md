@@ -59,12 +59,16 @@ channel until the v4.0.0 release train.
   (cap ~2k hosts, 7d TTL). Enrich/prefetch success density feeds a
   capped domain quality prior (`search-quality.json`, ±0.08 after
   ≥3 samples; kill `DONSETCH_NO_QUALITY_PRIOR`; walls and timeouts
-  never count). `donsetch status` has an **improve** line
+  never count). Agent-outcome feedback (must_contain miss / thin /
+  SoftNotFound) soft-demotes `class|host` in `outcome-feedback.json`
+  (±0.05 after ≥2 misses; **default off** until the 24h soak proves
+  it; enable with `DONSETCH_OUTCOME_FEEDBACK=1`; never extra fetches).
+  `donsetch status` has an **improve** line
   (warm-hits, walled, cooldowns, flaky, low-trust/quarantined,
-  quality hosts) and `donsetch doctor --improve` explains the loop
-  in ~10 lines with live local receipts and kill switches. No MCP
-  tool, no telemetry, no cross-machine sharing. A 24h soak battery
-  still gates any public improve claim.
+  quality hosts, outcome demotes) and `donsetch doctor --improve`
+  explains the loop in ~10 lines with live local receipts and kill
+  switches. No MCP tool, no telemetry, no cross-machine sharing.
+  A 24h soak battery still gates any public improve claim.
 - `just win-check`: type-checks the crate for `x86_64-pc-windows-gnu`
   from Linux (clippy, no linkage), both `--no-default-features` and
   the full feature set, so `#[cfg(windows)]` breakage from a

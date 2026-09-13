@@ -1363,6 +1363,7 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
         &trace,
         t0.elapsed().as_millis(),
     );
+    maybe_record_agent_outcome(daemon, &host, &opts, &ex, &final_verdict);
     if prewarmed {
         res["_meta"]["com.donsetch/fetch-debug"]["prewarmed_by_search"] = json!(true);
     }
@@ -2188,6 +2189,7 @@ pub(super) async fn fetch_with_actions(
         &trace,
         t0.elapsed().as_millis(),
     );
+    maybe_record_agent_outcome(daemon, host, opts, &ex, "ContentOk");
     res["structuredContent"]["actions"] = Value::Array(steps_json);
     apply_link_handles(daemon, &mut res).await;
     if image_text {
@@ -3048,6 +3050,40 @@ pub(super) fn format_fetch_markdown(
         markdown.push_str(&body);
     }
     markdown
+}
+
+/// B4 agent-outcome feedback (default off). Soft-demote the
+/// (class, host) when the agent's own verification failed:
+/// must_contain returned NO MATCH, or the page was unreadable
+/// (thin / SoftNotFound). Walls never count: a challenge is a
+/// routing fact, not a quality fact. Never fetches anything.
+fn maybe_record_agent_outcome(
+    daemon: &Daemon,
+    host: &str,
+    opts: &ExtractOptions,
+    ex: &extract::Extracted,
+    verdict: &str,
+) {
+    if !crate::config::cfg().search.outcome_feedback {
+        return;
+    }
+    // Wall family (Debug format carries the vendor): routing, not
+    // quality. SoftNotFound is a real content failure and falls through.
+    if verdict.starts_with("Challenge")
+        || matches!(verdict, "AuthWall" | "Paywall" | "Blocked")
+    {
+        return;
+    }
+    let class = crate::search::outcome_class(
+        opts.must_contain.is_some(),
+        opts.focus.is_some() || opts.toc || opts.section.is_some(),
+    );
+    let probe_miss =
+        opts.must_contain.is_some() && ex.markdown.starts_with("probe: NO MATCH");
+    let unreadable = ex.thin || verdict == "SoftNotFound";
+    if probe_miss || unreadable {
+        daemon.searcher.observe_outcome_miss(class, host);
+    }
 }
 
 pub(super) fn finish_result(

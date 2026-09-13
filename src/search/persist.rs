@@ -425,6 +425,155 @@ pub(crate) fn apply_quality_prior(results: &mut [Merged], quality: &QualityMap) 
     }
 }
 
+// ────────────────────────── B4 agent-outcome feedback ──────────────────────────
+
+/// Coarse class of the agent's fetch intent. Keys the outcome
+/// store so a must_contain probe miss does not poison full-page
+/// ranking for the same host, and vice versa.
+pub fn outcome_class(must_contain: bool, targeted_read: bool) -> &'static str {
+    if must_contain {
+        "probe"
+    } else if targeted_read {
+        "read"
+    } else {
+        "page"
+    }
+}
+
+/// `class|host` -> soft demote EWMA (0.5 seed; misses pull toward 0.1).
+pub type OutcomeMap = HashMap<String, HostQuality>;
+
+const OUTCOME_DISK_VERSION: u32 = 1;
+const OUTCOME_CAP: usize = 2_000;
+const OUTCOME_TTL_SECS: u64 = 30 * 86_400;
+const OUTCOME_MIN_SAMPLES: u32 = 2;
+/// Smaller than the quality prior: outcome feedback is a tie-break,
+/// not a verdict. Default-off until soak.
+const OUTCOME_WEIGHT: f64 = 0.05;
+
+fn outcome_path() -> Option<std::path::PathBuf> {
+    Some(crate::paths::cache_dir().join("outcome-feedback.json"))
+}
+
+fn outcome_key(class: &str, host: &str) -> String {
+    format!("{}|{}", class, quality_host_key(host))
+}
+
+/// Status/doctor: (tracked keys, demoted keys).
+pub fn load_outcome_for_status() -> (usize, usize) {
+    let map = load_outcome_disk();
+    let demoted = map
+        .values()
+        .filter(|q| q.samples >= OUTCOME_MIN_SAMPLES && q.ewma <= 0.40)
+        .count();
+    (map.len(), demoted)
+}
+
+pub(crate) fn load_outcome_disk() -> OutcomeMap {
+    let mut map = OutcomeMap::new();
+    let Some(path) = outcome_path() else { return map };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return map;
+    };
+    #[derive(serde::Deserialize)]
+    struct Disk {
+        #[serde(default)]
+        hosts: OutcomeMap,
+    }
+    let Ok(d) = serde_json::from_str::<Disk>(&raw) else {
+        return map;
+    };
+    let now = now_unix();
+    for (k, q) in d.hosts {
+        if now.saturating_sub(q.last) > OUTCOME_TTL_SECS {
+            continue;
+        }
+        map.insert(k, q);
+    }
+    map
+}
+
+pub(crate) fn save_outcome_disk(map: &OutcomeMap) {
+    let Some(path) = outcome_path() else { return };
+    #[derive(serde::Serialize)]
+    struct Disk {
+        version: u32,
+        hosts: OutcomeMap,
+    }
+    let disk = Disk {
+        version: OUTCOME_DISK_VERSION,
+        hosts: map.clone(),
+    };
+    let Ok(json) = serde_json::to_string(&disk) else {
+        return;
+    };
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(tmp, path);
+    }
+}
+
+pub(crate) fn save_outcome_disk_if_dirty(searcher: &super::Searcher, map: &OutcomeMap) {
+    if !searcher
+        .outcome_dirty
+        .swap(false, std::sync::atomic::Ordering::Relaxed)
+    {
+        return;
+    }
+    save_outcome_disk(map);
+}
+
+/// One agent-outcome miss. Demote-only: successes are not recorded
+/// (the agent only sets must_contain when it is hunting; a MATCH is
+/// the expected path, not a rare quality signal).
+pub(crate) fn observe_outcome_miss(map: &mut OutcomeMap, class: &str, host: &str) {
+    let key = outcome_key(class, host);
+    let target = 0.1f32;
+    let entry = map.entry(key).or_default();
+    entry.ewma = entry.ewma * 0.7 + target * 0.3;
+    entry.samples = entry.samples.saturating_add(1);
+    entry.last = now_unix();
+    if map.len() > OUTCOME_CAP {
+        let Some(coldest) = map
+            .iter()
+            .min_by_key(|(_, q)| q.last)
+            .map(|(k, _)| k.clone())
+        else {
+            return;
+        };
+        map.remove(&coldest);
+    }
+}
+
+/// Soft demote hosts that repeatedly failed agent outcomes under any
+/// class. Search does not know the agent's next must_contain; a host
+/// that chronically misses probes or yields thin pages is a weak
+/// source for the next click too.
+pub(crate) fn apply_outcome_demote(results: &mut [Merged], outcomes: &OutcomeMap) {
+    if !crate::config::cfg().search.outcome_feedback {
+        return;
+    }
+    for r in results.iter_mut() {
+        let host = super::rank::host_of(&r.url);
+        let key = quality_host_key(&host);
+        let worst = outcomes
+            .iter()
+            .filter(|(k, q)| {
+                k.ends_with(&format!("|{key}"))
+                    && q.samples >= OUTCOME_MIN_SAMPLES
+                    && q.ewma <= 0.40
+            })
+            .map(|(_, q)| q.ewma)
+            .fold(None::<f32>, |acc, e| {
+                Some(acc.map_or(e, |a: f32| a.min(e)))
+            });
+        if let Some(ewma) = worst {
+            let demote = ((0.5 - ewma as f64) * 2.0).clamp(0.0, 1.0);
+            r.score -= OUTCOME_WEIGHT * demote;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,5 +744,94 @@ mod tests {
         assert_eq!(map.len(), QUALITY_CAP, "cap must hold");
         assert!(map.contains_key("new.example"));
         assert!(!map.contains_key("h0.example"), "coldest LRU must evict");
+    }
+
+    // ── B4 agent-outcome ──
+
+    #[test]
+    fn outcome_class_separates_probe_read_page() {
+        assert_eq!(outcome_class(true, false), "probe");
+        assert_eq!(outcome_class(false, true), "read");
+        assert_eq!(outcome_class(false, false), "page");
+    }
+
+    #[test]
+    fn outcome_demote_needs_two_misses_and_default_off_blocks_apply() {
+        let dir = isolate_cache("outcome");
+        // Default: outcome_feedback=false → apply is a no-op even
+        // with a demoted map (the store is the soak-proven layer).
+        let mut map = OutcomeMap::new();
+        observe_outcome_miss(&mut map, "probe", "weak.example");
+        observe_outcome_miss(&mut map, "probe", "weak.example");
+        let key = outcome_key("probe", "weak.example");
+        let q = &map[&key];
+        assert_eq!(q.samples, 2);
+        assert!(q.ewma <= 0.40, "two misses must demote, got {}", q.ewma);
+
+        let mut results = vec![merged("https://weak.example/a", 1.0)];
+        apply_outcome_demote(&mut results, &map);
+        assert!(
+            (results[0].score - 1.0).abs() < 1e-9,
+            "default-off must leave scores untouched, got {}",
+            results[0].score
+        );
+        clean_isolate(dir);
+    }
+
+    #[test]
+    fn outcome_demote_applies_when_enabled() {
+        let dir = isolate_cache("outcome-on");
+        unsafe {
+            std::env::set_var("DONSETCH_NO_CONFIG_FILE", "1");
+            std::env::set_var("DONSETCH_OUTCOME_FEEDBACK", "1");
+        }
+        let mut map = OutcomeMap::new();
+        observe_outcome_miss(&mut map, "probe", "weak.example");
+        observe_outcome_miss(&mut map, "probe", "weak.example");
+        let mut results = vec![
+            merged("https://weak.example/a", 1.0),
+            merged("https://fine.example/b", 1.0),
+        ];
+        apply_outcome_demote(&mut results, &map);
+        assert!(
+            results[0].score < 1.0,
+            "enabled outcome feedback must soft-demote, got {}",
+            results[0].score
+        );
+        assert!(
+            (results[1].score - 1.0).abs() < 1e-9,
+            "untracked host must stay neutral, got {}",
+            results[1].score
+        );
+        unsafe {
+            std::env::remove_var("DONSETCH_OUTCOME_FEEDBACK");
+        }
+        clean_isolate(dir);
+    }
+
+    #[test]
+    fn outcome_probe_miss_does_not_poison_other_hosts_via_class() {
+        // Key is class|host: a probe miss on a.example never touches b.example.
+        let mut map = OutcomeMap::new();
+        observe_outcome_miss(&mut map, "probe", "a.example");
+        observe_outcome_miss(&mut map, "probe", "a.example");
+        assert!(map.contains_key("probe|a.example"));
+        assert!(!map.contains_key("probe|b.example"));
+        assert!(!map.contains_key("page|a.example"), "class stays scoped");
+    }
+
+    #[test]
+    fn outcome_survives_restart() {
+        let dir = isolate_cache("outcome-persist");
+        let mut map = OutcomeMap::new();
+        observe_outcome_miss(&mut map, "page", "keep.example");
+        observe_outcome_miss(&mut map, "page", "keep.example");
+        save_outcome_disk(&map);
+        let reloaded = load_outcome_disk();
+        assert_eq!(reloaded["page|keep.example"].samples, 2);
+        let (n, demoted) = load_outcome_for_status();
+        assert!(n >= 1);
+        assert!(demoted >= 1);
+        clean_isolate(dir);
     }
 }

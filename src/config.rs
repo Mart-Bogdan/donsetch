@@ -134,6 +134,10 @@ section!(SearchSection {
     brightdata_zone: String = String::new(),
     /// B3: learned host quality from enrich/prefetch success density.
     quality_prior: bool = true,
+    /// B4: agent-outcome feedback (must_contain miss / content_ok=false).
+    /// DEFAULT OFF until the 24h soak proves it. Never triggers
+    /// extra fetches; only soft-demotes (class, host) for ranking.
+    outcome_feedback: bool = false,
 });
 
 section!(BrowserSection {
@@ -1166,6 +1170,14 @@ fn legacy_layer() -> (VMap, Vec<String>) {
             "DONSETCH_NO_QUALITY_PRIOR",
         );
     }
+    if legacy_flag("DONSETCH_OUTCOME_FEEDBACK") {
+        put(
+            &mut m,
+            "search.outcome_feedback",
+            true.into(),
+            "DONSETCH_OUTCOME_FEEDBACK",
+        );
+    }
 
     // debug
     if std::env::var_os("DONGHOST_DEBUG").is_some() {
@@ -1615,6 +1627,13 @@ pub(crate) fn fieldbook() -> &'static Fieldbook {
             FieldKind::Bool,
             "true",
             "learned host quality from enrich success; small rank nudge",
+        ),
+        (
+            "search",
+            "outcome_feedback",
+            FieldKind::Bool,
+            "false",
+            "agent-outcome demotes (must_contain miss / content_ok=false); default off until soak",
         ),
         // browser
         (
@@ -2328,6 +2347,7 @@ pub(crate) fn legacy_target_of(name: &str) -> (&'static str, &'static str) {
         "DONSEEK_RERANK_THREADS" => ("search", "rerank_threads"),
         "DONSETCH_BRIGHTDATA_ZONE" => ("search", "brightdata_zone"),
         "DONSETCH_NO_QUALITY_PRIOR" => ("search", "quality_prior"),
+        "DONSETCH_OUTCOME_FEEDBACK" => ("search", "outcome_feedback"),
         "DONSETCH_BROWSER_BACKEND" | "DONGHOST_BROWSER_BACKEND" => ("browser", "backend"),
         "DONGHOST_CHROME" => ("browser", "chromium_path"),
         "DONGHOST_NO_SANDBOX" => ("browser", "no_sandbox"),
@@ -3250,6 +3270,28 @@ mod tests {
         assert_eq!(
             legacy_target_of("DONSETCH_NO_QUALITY_PRIOR"),
             ("search", "quality_prior")
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn outcome_feedback_defaults_off_and_env_enables() {
+        let guard = clean_env();
+        set_env("DONSETCH_NO_CONFIG_FILE", "1");
+        let loaded = load().expect("defaults");
+        assert!(
+            !loaded.config.search.outcome_feedback,
+            "search.outcome_feedback must default false (soak gate)"
+        );
+        set_env("DONSETCH_OUTCOME_FEEDBACK", "1");
+        let loaded = load().expect("enable");
+        assert!(
+            loaded.config.search.outcome_feedback,
+            "DONSETCH_OUTCOME_FEEDBACK must map to search.outcome_feedback=true"
+        );
+        assert_eq!(
+            legacy_target_of("DONSETCH_OUTCOME_FEEDBACK"),
+            ("search", "outcome_feedback")
         );
         drop(guard);
     }

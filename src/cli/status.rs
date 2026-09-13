@@ -227,11 +227,12 @@ pub async fn run() {
             (t.len(), ti.len(), low + f.len())
         };
         let (q_hosts, q_high, q_low) = crate::search::persist_load_quality_for_status();
-        if hosts == 0 && warm_hits == 0 && low_trust == 0 && q_hosts == 0 {
+        let (o_keys, o_demoted) = crate::search::persist_load_outcome_for_status();
+        if hosts == 0 && warm_hits == 0 && low_trust == 0 && q_hosts == 0 && o_keys == 0 {
             "learning (nothing recorded yet)".to_string()
         } else {
             format!(
-                "{warm} warm-ready · {warm_hits} warm-hits · {walled} walled · {cooldowns} cooldowns · {flaky} flaky · {low_trust} low-trust/quarantined · quality {q_high}+/{q_low}-/{q_hosts}"
+                "{warm} warm-ready · {warm_hits} warm-hits · {walled} walled · {cooldowns} cooldowns · {flaky} flaky · {low_trust} low-trust/quarantined · quality {q_high}+/{q_low}-/{q_hosts} · outcome {o_demoted}/{o_keys}"
             )
         }
     };

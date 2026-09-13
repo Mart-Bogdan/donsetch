@@ -20,14 +20,17 @@ mod render;
 mod tasks;
 
 pub use persist::load_for_status as persist_load_for_status;
+pub use persist::load_outcome_for_status as persist_load_outcome_for_status;
 pub use persist::load_quality_for_status as persist_load_quality_for_status;
+pub use persist::outcome_class;
 
 pub use render::{render_compact_markdown, render_markdown, render_meta};
 
 use enrich::PrewarmCache;
 use persist::{
-    QualityMap, load_cache_disk, load_health_disk, load_quality_disk, save_cache_disk,
-    save_health_disk_if_dirty, save_quality_disk_if_dirty,
+    OutcomeMap, QualityMap, load_cache_disk, load_health_disk, load_outcome_disk,
+    load_quality_disk, save_cache_disk, save_health_disk_if_dirty, save_outcome_disk_if_dirty,
+    save_quality_disk_if_dirty,
 };
 use tasks::{EngineResult, TaskFut, engine_task, ghost_engine_task, vertical_task};
 
@@ -203,6 +206,10 @@ pub struct Searcher {
     /// slightly after enough samples. Kill: search.quality_prior.
     quality: Mutex<QualityMap>,
     quality_dirty: std::sync::atomic::AtomicBool,
+    /// B4: agent-outcome demotes (`class|host` -> EWMA).
+    /// Default off (`search.outcome_feedback`); never extra fetches.
+    outcome: Mutex<OutcomeMap>,
+    outcome_dirty: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "rerank")]
@@ -276,6 +283,8 @@ impl Searcher {
             ghost: None,
             quality: Mutex::new(load_quality_disk()),
             quality_dirty: std::sync::atomic::AtomicBool::new(false),
+            outcome: Mutex::new(load_outcome_disk()),
+            outcome_dirty: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -923,6 +932,15 @@ impl Searcher {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             persist::apply_quality_prior(&mut results, &quality);
         }
+        // B4: soft demote hosts that chronically failed agent
+        // outcomes (default off).
+        {
+            let outcome = self
+                .outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            persist::apply_outcome_demote(&mut results, &outcome);
+        }
         results.sort_by(|a, b| b.score.total_cmp(&a.score));
         let weak = rank::is_weak(&results, total);
 
@@ -1088,6 +1106,28 @@ impl Searcher {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         save_quality_disk_if_dirty(self, &quality);
+    }
+
+    /// B4: record one agent-outcome miss. No-op unless
+    /// `search.outcome_feedback` is on. Never fetches anything.
+    pub fn observe_outcome_miss(&self, class: &str, host: &str) {
+        if !crate::config::cfg().search.outcome_feedback {
+            return;
+        }
+        {
+            let mut outcome = self
+                .outcome
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            persist::observe_outcome_miss(&mut outcome, class, host);
+        }
+        self.outcome_dirty
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let outcome = self
+            .outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        save_outcome_disk_if_dirty(self, &outcome);
     }
 }
 
