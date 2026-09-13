@@ -124,6 +124,9 @@ pub async fn run() {
     // 2b. Fetch egress + trust posture (local-only, always runs).
     report!("Fetch egress", check_fetch_egress());
 
+    // 2c. Proxy pool + persisted lane health (local-only).
+    report!("Proxy pool", check_proxy_pool());
+
     // 3. TLS fingerprint (fast enough to keep in fast mode).
     if let Some(ref fm) = fetcher {
         report!("TLS fingerprint", check_tls(fm).await);
@@ -358,6 +361,59 @@ fn check_fetch_egress() -> CheckResult {
             CheckResult::Pass(bits.join(" · "))
         }
     }
+}
+
+/// Proxy pool size + persisted egress-health.json (search/fetch lane
+/// burn memory). Local-only: reads config and the health file, no
+/// network. Named fix when every proxy lane is currently benched.
+fn check_proxy_pool() -> CheckResult {
+    let proxy = &crate::config::cfg().proxy;
+    let pool_n = proxy.pool.iter().filter(|s| !s.trim().is_empty()).count();
+    let persist = proxy.egress_persist && !crate::config::cfg().state.no_disk_state;
+    let mut bits = Vec::new();
+    if pool_n == 0 {
+        bits.push("pool empty (DONSEEK_PROXIES or [proxy] pool; direct-only egress)".to_string());
+    } else {
+        bits.push(format!("{pool_n} proxy lane(s) configured"));
+    }
+    bits.push(if persist {
+        "egress health persisted".into()
+    } else {
+        "egress health NOT persisted (proxy.egress_persist=false or state.no_disk_state)".into()
+    });
+
+    if !persist {
+        return CheckResult::Pass(bits.join(" · "));
+    }
+
+    let path = paths::cache_dir().join("egress-health.json");
+    if !path.exists() {
+        bits.push("no egress-health.json yet (benches appear after the first burn)".into());
+        return CheckResult::Pass(bits.join(" · "));
+    }
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            bits.push(format!("egress-health.json unreadable: {e}"));
+            return CheckResult::Warn(bits.join(" · "));
+        }
+    };
+    let burned = raw.matches("\"burned\"").count();
+    let dead_n: usize = serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| v.get("dead").and_then(|d| d.as_array()).map(|a| a.len()))
+        .unwrap_or(0);
+
+    if pool_n > 0 && dead_n >= pool_n {
+        bits.push(format!(
+            "all {pool_n} proxy lane(s) benched in egress-health.json: run `donsetch proxy check` and fix creds/network"
+        ));
+        return CheckResult::Warn(bits.join(" · "));
+    }
+    bits.push(format!(
+        "learned benches: {burned} burned pair marker(s), {dead_n} dead lane(s)"
+    ));
+    CheckResult::Pass(bits.join(" · "))
 }
 
 async fn check_tls(fetcher: &Fetcher) -> CheckResult {
