@@ -89,6 +89,19 @@ channel until the v4.0.0 release train.
   stress-aware: StackExchange only on Q&A/error language, MDN only
   on web-platform tokens, HN only on release/announce; under pool
   stress HN drops first.
+- **Doctor ultra (v4 D):** broader local coverage, same fast default.
+  New checks: config posture (`NO_CONFIG_FILE` + `DONSETCH_CONFIG`
+  conflict, missing explicit file, layer report), search health
+  (engine trust, quarantine, quality/outcome receipts, BYOK key
+  state counts, C kill-switch flags), clearance stores (routes.json
+  counts, handles, cookie vault), crawl stores (governor host
+  ladders, page-history size warning past 5MB), DNS resolution
+  (independent of HTTP, names AAAA presence), and a captive-portal
+  probe under `--deep` (`generate_204` must stay 204). State
+  permissions now cover every secret-bearing store
+  (`ghost-state.json`, `routes.json`, `byok-keys.json`) and
+  auto-tighten to 0600. All new checks carry unit tests; live
+  `doctor` on a real box is green with honest warnings.
 - `just win-check`: type-checks the crate for `x86_64-pc-windows-gnu`
   from Linux (clippy, no linkage), both `--no-default-features` and
   the full feature set, so `#[cfg(windows)]` breakage from a

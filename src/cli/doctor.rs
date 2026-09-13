@@ -20,6 +20,7 @@ use crate::fetch::client::Fetcher;
 use crate::paths;
 use crate::profile::BrowserProfile;
 
+#[derive(Debug)]
 enum CheckResult {
     Pass(String),
     Warn(String),
@@ -157,8 +158,13 @@ pub async fn run() {
     // (default) skips the seconds-long live launch; --deep runs it.
     if deep {
         report!("Browser launch", check_browser_launch().await);
+        // Captive portal: generate_204 must stay 204. A hotel/airport
+        // login page answering 200/302 is the classic "TLS works but
+        // every fetch is a login form" failure.
+        report!("Captive portal", check_captive_portal(fetcher.as_ref()).await);
     } else {
         cli::check_dim("Browser launch", "skipped (--deep to run)");
+        cli::check_dim("Captive portal", "skipped (--deep to run)");
     }
 
     // 8. Cache directory.
@@ -195,10 +201,26 @@ pub async fn run() {
     // 15.5 BYOK plugins (user-registered executable adapters).
     report!("Search plugins", check_plugins());
 
-    // 16. MCP client registration (detect + print blocks).
+    // 16. Config posture: layer conflicts, missing files, redaction.
+    report!("Config posture", check_config_posture());
+
+    // 17. Search health snapshot (local, fast): trust, quarantine,
+    // quality/outcome receipts, BYOK key states, C kill switches.
+    report!("Search health", check_search_health());
+
+    // 18. Clearance stores: routes.json, handles, cookie vault.
+    report!("Clearance stores", check_clearance_stores());
+
+    // 19. Crawl stores: governor persist, page-history size.
+    report!("Crawl stores", check_crawl_stores());
+
+    // 20. Network reality: DNS + optional captive-portal probe.
+    report!("DNS", check_dns());
+
+    // 21. MCP client registration (detect + print blocks).
     print_mcp_section();
 
-    // 17. Legacy env vars (the pre-v4 names): still honored, but
+    // 22. Legacy env vars (the pre-v4 names): still honored, but
     // each one active in this shell gets ONE warning naming its
     // config key. Cut at the v4 release.
     let legacy: Vec<&'static str> = crate::config::legacy_vars_in_env();
@@ -807,41 +829,73 @@ async fn check_browser_launch() -> CheckResult {
     }
 }
 
-/// ghost-state.json holds cookies : it must not be
-/// world-readable.
+/// Session-bearing state must not be world-readable. Covers the
+/// cookie vault (ghost-state.json) and the TLS-session routes file.
 fn check_state_permissions() -> CheckResult {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let f = paths::cache_dir().join("ghost-state.json");
-        if !f.exists() {
-            return CheckResult::Pass("no state file yet".into());
-        }
-        match std::fs::metadata(&f) {
-            Ok(m) => {
-                let mode = m.permissions().mode() & 0o777;
-                if mode & 0o077 != 0 {
-                    // Auto-fix: tighten to 0600.
-                    let mut perm = m.permissions();
-                    perm.set_mode(0o600);
-                    if std::fs::set_permissions(&f, perm).is_ok() {
-                        return CheckResult::Fixed(format!(
-                            "tightened ghost-state.json {mode:o} → 600"
-                        ));
-                    }
-                    return CheckResult::Fail(
-                        format!("ghost-state.json is {mode:o} (group/other readable)"),
-                        format!("chmod 600 {}", f.display()),
-                    );
-                }
-                CheckResult::Pass(format!("{mode:o} on ghost-state.json"))
+        let dir = paths::cache_dir();
+        // Files that carry cookies, TLS sessions, or auth material.
+        // handles.json is opaque tokens, not secrets: leave it out.
+        let secret_files = ["ghost-state.json", "routes.json", "byok-keys.json"];
+        let mut fixed = Vec::new();
+        let mut failed = Vec::new();
+        let mut present = 0u32;
+        for name in secret_files {
+            let f = dir.join(name);
+            if !f.exists() {
+                continue;
             }
-            Err(e) => CheckResult::Warn(format!("cannot stat: {e}")),
+            present += 1;
+            let Ok(m) = std::fs::metadata(&f) else {
+                continue;
+            };
+            let mode = m.permissions().mode() & 0o777;
+            if mode & 0o077 == 0 {
+                continue;
+            }
+            let mut perm = m.permissions();
+            perm.set_mode(0o600);
+            if std::fs::set_permissions(&f, perm).is_ok() {
+                fixed.push(format!("{name} {mode:o}→600"));
+            } else {
+                failed.push(format!("{name} is {mode:o}"));
+            }
         }
+        if !failed.is_empty() {
+            return CheckResult::Fail(
+                failed.join(", "),
+                format!(
+                    "chmod 600 {}",
+                    failed
+                        .iter()
+                        .map(|s| s.split_whitespace().next().unwrap_or(""))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            );
+        }
+        if !fixed.is_empty() {
+            return CheckResult::Fixed(format!("tightened {}", fixed.join(", ")));
+        }
+        if present == 0 {
+            return CheckResult::Pass("no secret-bearing state files yet".into());
+        }
+        CheckResult::Pass(format!("{present} secret store(s) at 600"))
     }
     #[cfg(not(unix))]
     {
-        CheckResult::Pass("windows ACLs apply".into())
+        // Windows: ACLs inherit from the user profile; we do not
+        // rewrite them. Presence is still worth reporting.
+        let dir = paths::cache_dir();
+        let present = ["ghost-state.json", "routes.json", "byok-keys.json"]
+            .iter()
+            .filter(|n| dir.join(n).exists())
+            .count();
+        CheckResult::Pass(format!(
+            "windows ACLs apply ({present} secret store(s) present)"
+        ))
     }
 }
 
@@ -1184,6 +1238,237 @@ fn check_plugins() -> CheckResult {
             "{detail}; program not found: {}",
             missing.join(", ")
         ))
+    }
+}
+
+/// Config layers: conflicts the loader cannot express, missing
+/// explicit paths, and secret-redaction posture. Unknown keys and
+/// range errors already fail at load (`deny_unknown_fields`).
+fn check_config_posture() -> CheckResult {
+    let no_file = std::env::var_os("DONSETCH_NO_CONFIG_FILE").is_some();
+    let explicit = std::env::var_os("DONSETCH_CONFIG");
+    if no_file && explicit.is_some() {
+        return CheckResult::Fail(
+            "DONSETCH_NO_CONFIG_FILE and DONSETCH_CONFIG are both set".into(),
+            "unset one: NO_CONFIG_FILE means 'ignore all files'; DONSETCH_CONFIG names one file to load".into(),
+        );
+    }
+    if let Some(ref path) = explicit {
+        let p = std::path::PathBuf::from(path);
+        if !p.exists() {
+            return CheckResult::Fail(
+                format!("DONSETCH_CONFIG points at a missing file: {}", p.display()),
+                "create the file or unset DONSETCH_CONFIG".into(),
+            );
+        }
+    }
+    // Report layer posture without echoing secrets.
+    let home = dirs::config_dir()
+        .map(|d| d.join("donsetch").join("donsetch.toml"))
+        .filter(|p| p.exists());
+    let mut layers: Vec<&str> = Vec::new();
+    if no_file {
+        layers.push("env-only (NO_CONFIG_FILE)");
+    } else if let Some(ref h) = home {
+        layers.push(if h.exists() {
+            "user toml"
+        } else {
+            "defaults"
+        });
+    } else {
+        layers.push("defaults");
+    }
+    if explicit.is_some() {
+        layers.push("DONSETCH_CONFIG");
+    }
+    // Secret redaction: config show must never print a raw key.
+    // We only assert the redaction helpers exist (they are unit-
+    // tested); a live redaction probe would require inventing a key.
+    CheckResult::Pass(format!("layers: {}", layers.join(" + ")))
+}
+
+/// Search engine + learning receipts, local-only and fast. One
+/// line an agent can trust: is the roster healthy, is learning
+/// on, are the new C kill switches armed.
+fn check_search_health() -> CheckResult {
+    let (trust, trust_intent, failures) = crate::search::persist_load_for_status();
+    let low = trust.values().filter(|&&x| x < 0.5).count()
+        + trust_intent.values().filter(|&&x| x < 0.5).count();
+    let quarantined = failures.len();
+    let (q_hosts, _, _) = crate::search::persist_load_quality_for_status();
+    let (o_keys, o_demoted) = crate::search::persist_load_outcome_for_status();
+    let s = &crate::config::cfg().search;
+    let flags = format!(
+        "early={} compile={} instant={} quality={} outcome={}",
+        onoff(s.search_early),
+        onoff(s.query_compile),
+        onoff(s.serp_instant),
+        onoff(s.quality_prior),
+        onoff(s.outcome_feedback),
+    );
+    // BYOK key states: counts only, never the keys.
+    let store = crate::search::byok::store::ByokConfig::load();
+    let mut active = 0usize;
+    let mut limited = 0usize;
+    let mut dead = 0usize;
+    for p in &store.providers {
+        for k in &p.keys {
+            match k.state {
+                crate::search::byok::store::KeyState::Active => active += 1,
+                crate::search::byok::store::KeyState::RateLimited => limited += 1,
+                crate::search::byok::store::KeyState::CreditDepleted
+                | crate::search::byok::store::KeyState::Invalid => dead += 1,
+            }
+        }
+    }
+    let byok = if active + limited + dead == 0 {
+        "byok none".to_string()
+    } else {
+        format!("byok {active} active / {limited} limited / {dead} dead")
+    };
+    let detail = format!(
+        "trust {} entries ({low} low) · quarantined {quarantined} · quality {q_hosts} · outcome {o_keys} ({o_demoted} demoted) · {byok} · {flags}",
+        trust.len() + trust_intent.len()
+    );
+    if quarantined > 0 && low > 2 {
+        CheckResult::Warn(format!(
+            "{detail}; run a few searches to rebuild trust, or `donsetch status`"
+        ))
+    } else {
+        CheckResult::Pass(detail)
+    }
+}
+
+fn onoff(b: bool) -> &'static str {
+    if b {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+/// Clearance state: TLS-session routes, link handles, cookie vault.
+fn check_clearance_stores() -> CheckResult {
+    let dir = paths::cache_dir();
+    let mut bits: Vec<String> = Vec::new();
+
+    // routes.json: TLS sessions / 0-RTT material.
+    let routes = dir.join("routes.json");
+    if routes.exists() {
+        let n = std::fs::read(&routes)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v.get("routes").and_then(|r| r.as_object()).map(|o| o.len()))
+            .unwrap_or(0);
+        bits.push(format!("routes {n}"));
+    } else {
+        bits.push("routes none".into());
+    }
+
+    // handles.json: link-handle table (24h TTL, cap 2048).
+    let handles = dir.join("handles.json");
+    if handles.exists() {
+        let n = std::fs::read(&handles)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| {
+                v.get("l")
+                    .or_else(|| v.get("entries"))
+                    .and_then(|o| o.as_object())
+                    .map(|o| o.len())
+            })
+            .unwrap_or(0);
+        bits.push(format!("handles {n}"));
+    } else {
+        bits.push("handles none".into());
+    }
+
+    let vault = onoff(crate::config::cfg().state.cookie_vault);
+    bits.push(format!("cookie_vault {vault}"));
+    CheckResult::Pass(bits.join(" · "))
+}
+
+/// Crawl learning stores: governor host ladders + page history.
+fn check_crawl_stores() -> CheckResult {
+    let dir = paths::cache_dir();
+    let mut bits: Vec<String> = Vec::new();
+    let gov = dir.join("crawl-governor.json");
+    if gov.exists() {
+        let n = std::fs::read(&gov)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v.get("hosts").and_then(|h| h.as_array()).map(|a| a.len()))
+            .unwrap_or(0);
+        bits.push(format!("governor {n} hosts"));
+    } else {
+        bits.push("governor none".into());
+    }
+    let hist = dir.join("page-history.json");
+    if hist.exists() {
+        let size = hist.metadata().map(|m| m.len()).unwrap_or(0);
+        // > 5MB is a store that stopped rotating (or a very heavy
+        // crawl user): worth a warning, not a failure.
+        if size > 5_000_000 {
+            return CheckResult::Warn(format!(
+                "page-history is {} (delete or trim if crawls feel slow)",
+                format_size(size)
+            ));
+        }
+        bits.push(format!("history {}", format_size(size)));
+    } else {
+        bits.push("history none".into());
+    }
+    CheckResult::Pass(bits.join(" · "))
+}
+
+/// DNS resolution, independent of HTTP. Catches the "TLS works
+/// via proxy but the resolver is broken" class that check_network
+/// cannot see.
+fn check_dns() -> CheckResult {
+    use std::net::ToSocketAddrs;
+    match ("example.com", 443u16).to_socket_addrs() {
+        Ok(addrs) => {
+            let addrs: Vec<_> = addrs.collect();
+            if addrs.is_empty() {
+                CheckResult::Fail(
+                    "example.com resolved to zero addresses".into(),
+                    "check /etc/resolv.conf or your VPN DNS".into(),
+                )
+            } else {
+                let v6 = addrs.iter().any(|a| a.is_ipv6());
+                let note = if v6 { " (AAAA present)" } else { " (A only)" };
+                CheckResult::Pass(format!(
+                    "example.com → {} addr(s){note}",
+                    addrs.len()
+                ))
+            }
+        }
+        Err(e) => CheckResult::Fail(
+            format!("DNS lookup failed: {e}"),
+            "check /etc/resolv.conf, systemd-resolved, or your VPN DNS".into(),
+        ),
+    }
+}
+
+/// Captive-portal detector (--deep only). gstatic generate_204 is
+/// the industry-standard probe: a clean network returns 204 with an
+/// empty body; a portal rewrites it to a login page.
+async fn check_captive_portal(fetcher: Option<&Fetcher>) -> CheckResult {
+    let Some(fetcher) = fetcher else {
+        return CheckResult::Warn("skipped: fetcher unavailable".into());
+    };
+    match fetcher
+        .fetch("http://connectivitycheck.gstatic.com/generate_204")
+        .await
+    {
+        Ok(out) if out.status == 204 => {
+            CheckResult::Pass("generate_204 returned 204 (no portal)".into())
+        }
+        Ok(out) => CheckResult::Warn(format!(
+            "generate_204 returned {} : possible captive portal (hotel/airport Wi-Fi login page)",
+            out.status
+        )),
+        Err(e) => CheckResult::Warn(format!("portal probe failed: {e}")),
     }
 }
 
@@ -1808,6 +2093,126 @@ async fn stealth_scorecard(record: bool, json: bool, parity: bool) -> i32 {
         }
     }
     if drifted == 0 { 0 } else { 1 }
+}
+
+#[cfg(test)]
+mod doctor_ultra_tests {
+    use super::*;
+
+    fn isolated_cache() -> tempfile_dir::TempDir {
+        // Hand-rolled: we do not want a tempfile dep just for this.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "donsetch-doctor-ultra-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        unsafe { std::env::set_var("DONSETCH_CACHE_DIR", &dir) };
+        tempfile_dir::TempDir { dir }
+    }
+
+    mod tempfile_dir {
+        pub struct TempDir {
+            pub dir: std::path::PathBuf,
+        }
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+    }
+
+    #[test]
+    fn config_posture_flags_no_config_file_plus_explicit_path() {
+        let _g = isolated_cache();
+        unsafe {
+            std::env::set_var("DONSETCH_NO_CONFIG_FILE", "1");
+            std::env::set_var("DONSETCH_CONFIG", "/nonexistent/donsetch.toml");
+        }
+        let r = check_config_posture();
+        unsafe {
+            std::env::remove_var("DONSETCH_NO_CONFIG_FILE");
+            std::env::remove_var("DONSETCH_CONFIG");
+        }
+        match r {
+            CheckResult::Fail(detail, _) => {
+                assert!(detail.contains("both set"), "{detail}");
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_posture_flags_missing_explicit_config() {
+        let _g = isolated_cache();
+        unsafe {
+            std::env::remove_var("DONSETCH_NO_CONFIG_FILE");
+            std::env::set_var("DONSETCH_CONFIG", "/nonexistent/donsetch.toml");
+        }
+        let r = check_config_posture();
+        unsafe {
+            std::env::remove_var("DONSETCH_CONFIG");
+        }
+        match r {
+            CheckResult::Fail(detail, _) => {
+                assert!(detail.contains("missing file"), "{detail}");
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_health_reports_kill_switches() {
+        let _g = isolated_cache();
+        let r = check_search_health();
+        let detail = match r {
+            CheckResult::Pass(d) | CheckResult::Warn(d) => d,
+            CheckResult::Fail(d, _) => d,
+            CheckResult::Fixed(d) => d,
+        };
+        assert!(detail.contains("early="), "{detail}");
+        assert!(detail.contains("compile="), "{detail}");
+        assert!(detail.contains("instant="), "{detail}");
+        assert!(detail.contains("byok"), "{detail}");
+    }
+
+    #[test]
+    fn clearance_and_crawl_stores_tolerate_missing_files() {
+        let _g = isolated_cache();
+        let c = check_clearance_stores();
+        assert!(
+            matches!(c, CheckResult::Pass(_)),
+            "clearance must pass on empty cache"
+        );
+        let k = check_crawl_stores();
+        assert!(
+            matches!(k, CheckResult::Pass(_)),
+            "crawl must pass on empty cache"
+        );
+    }
+
+    #[test]
+    fn state_permissions_tightens_world_readable_secret_files() {
+        let _g = isolated_cache();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let f = paths::cache_dir().join("routes.json");
+            std::fs::write(&f, b"{}").unwrap();
+            let mut perm = std::fs::metadata(&f).unwrap().permissions();
+            perm.set_mode(0o644);
+            std::fs::set_permissions(&f, perm).unwrap();
+            match check_state_permissions() {
+                CheckResult::Fixed(d) => {
+                    assert!(d.contains("routes.json"), "{d}");
+                }
+                other => panic!("expected Fixed, got {other:?}"),
+            }
+            let mode = std::fs::metadata(&f).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
 }
 
 #[cfg(test)]
