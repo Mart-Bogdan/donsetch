@@ -17,12 +17,29 @@
 //!   startup and never assigned mid-query.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-type PaceGate = Arc<tokio::sync::Mutex<Option<Instant>>>;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::transport::proxy::Proxy;
+
+type PaceGate = Arc<tokio::sync::Mutex<Option<Instant>>>;
+
+/// Process-wide pool (v4 A2). Installed once by the daemon so
+/// ghost launch and doctor can share the same health world as
+/// search/crawl/fetch without threading Arc through every path.
+static GLOBAL: OnceLock<Arc<EgressPool>> = OnceLock::new();
+
+/// Install the daemon's shared pool. First call wins; later calls
+/// are ignored (tests construct private pools).
+pub fn install_global(pool: Arc<EgressPool>) {
+    let _ = GLOBAL.set(pool);
+}
+
+/// The installed pool, if any.
+pub fn global() -> Option<Arc<EgressPool>> {
+    GLOBAL.get().cloned()
+}
 
 const BURN_COOLDOWN: Duration = Duration::from_secs(600);
 const AUTH_BAN: Duration = Duration::from_secs(86_400); // 24h: wrong creds don't heal fast
@@ -130,7 +147,7 @@ fn remaining_secs(until: Option<Instant>) -> u64 {
 pub struct EgressPool {
     egresses: Vec<Egress>,
     pacing: Mutex<HashMap<(String, String), PaceGate>>,
-    /// (engine, egress_id) -> state
+    /// (engine|host, egress_id) -> state
     pairs: Mutex<HashMap<(String, String), PairState>>,
     /// Global proxy liveness (connect failures burn a proxy
     /// for ALL engines; a dead line is a dead line).
@@ -142,6 +159,16 @@ pub struct EgressPool {
     /// Set on pair/dead mutation; save swaps it off so an idle
     /// process never rewrites the file.
     health_dirty: AtomicBool,
+    /// Per-lane RTT EWMA in milliseconds (search probes, fetch,
+    /// crawl). Feeds pacing and doctor --deep slow-lane rows.
+    rtt: Mutex<HashMap<String, f64>>,
+    /// Fetch stickiness: host -> egress_id. One host rides one
+    /// exit until a rotate signal (429/407/dead/timeout).
+    sticky: Mutex<HashMap<String, String>>,
+    /// Persona exclusive bind: egress_id -> host. A lane bound
+    /// to persona A is never minted for persona B (no shared
+    /// exit identity across domains).
+    persona_lanes: Mutex<HashMap<String, String>>,
 }
 
 /// Cheap non-crypto jitter from clock nanos (not security,
@@ -174,6 +201,9 @@ impl EgressPool {
             stress_ok: AtomicU32::new(2000), // seed optimistic
             stress_fail: AtomicU32::new(0),
             health_dirty: AtomicBool::new(false),
+            rtt: Mutex::new(HashMap::new()),
+            sticky: Mutex::new(HashMap::new()),
+            persona_lanes: Mutex::new(HashMap::new()),
         };
         pool.load_health_disk();
         pool
@@ -509,16 +539,338 @@ impl EgressPool {
         self.save_health_disk_if_dirty();
     }
 
+    /// True when the lane is currently benched (dead or auth-banned).
+    pub fn is_dead(&self, egress_id: &str) -> bool {
+        self.dead
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(egress_id)
+            .is_some_and(|&t| t > Instant::now())
+    }
+
+    /// True when (scope, lane) is burned and still cooling.
+    fn pair_burned(&self, scope: &str, egress_id: &str) -> bool {
+        let pairs = self
+            .pairs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(
+            pairs.get(&(scope.to_string(), egress_id.to_string())),
+            Some(s) if s.health == Health::Burned
+                && s.burned_until.is_some_and(|t| t > Instant::now())
+        )
+    }
+
+    /// True when (scope, lane) is in post-block probation (first 429
+    /// class signal). Fetch rotation deprioritizes these so a sticky
+    /// host actually moves to another exit.
+    fn pair_suspect(&self, scope: &str, egress_id: &str) -> bool {
+        let pairs = self
+            .pairs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(
+            pairs.get(&(scope.to_string(), egress_id.to_string())),
+            Some(s) if s.health == Health::Suspect
+        )
+    }
+
+    /// Record a per-lane RTT sample (EWMA, alpha 0.25).
+    /// Direct is included: the home IP can also go slow.
+    pub fn observe_rtt(&self, egress_id: &str, rtt: Duration) {
+        let ms = rtt.as_secs_f64() * 1000.0;
+        if !ms.is_finite() || ms < 0.0 {
+            return;
+        }
+        let mut rtt = self
+            .rtt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let e = rtt.entry(egress_id.to_string()).or_insert(ms);
+        *e = *e * 0.75 + ms * 0.25;
+    }
+
+    /// Per-lane RTT EWMA in milliseconds, if any sample landed.
+    pub fn rtt_ms(&self, egress_id: &str) -> Option<f64> {
+        self.rtt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(egress_id)
+            .copied()
+    }
+
+    /// Slow-lane threshold used by doctor and pacing (ms).
+    pub fn slow_rtt_ms() -> f64 {
+        2_500.0
+    }
+
+    /// One-line-per-lane summary for `doctor --deep` / status.
+    /// Local-only: health + RTT + persona bind, no network.
+    pub fn lane_summary(&self) -> Vec<LaneSummary> {
+        let now = Instant::now();
+        let pairs = self
+            .pairs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dead = self
+            .dead
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rtt = self
+            .rtt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let persona = self
+            .persona_lanes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.egresses
+            .iter()
+            .map(|e| {
+                let dead_until = dead.get(&e.id).copied().filter(|&t| t > now);
+                let kind = if dead_until.is_some() {
+                    let remaining = dead_until
+                        .map(|t| t.saturating_duration_since(now))
+                        .unwrap_or_default();
+                    if remaining > Duration::from_secs(3600) {
+                        "auth".to_string()
+                    } else {
+                        "dead".to_string()
+                    }
+                } else {
+                    // Worst pair health across scopes that mention this lane.
+                    let mut worst = "ok";
+                    for ((_, id), s) in pairs.iter() {
+                        if id != &e.id {
+                            continue;
+                        }
+                        let label = match s.health {
+                            Health::Healthy => "ok",
+                            Health::Suspect => "suspect",
+                            Health::Burned => {
+                                if s.burned_until.is_some_and(|t| t > now) {
+                                    "burned"
+                                } else {
+                                    "probation"
+                                }
+                            }
+                        };
+                        if rank(label) > rank(worst) {
+                            worst = label;
+                        }
+                    }
+                    match rtt.get(&e.id) {
+                        Some(&ms) if ms >= Self::slow_rtt_ms() && worst == "ok" => "slow",
+                        _ => worst,
+                    }
+                    .to_string()
+                };
+                LaneSummary {
+                    id: e.id.clone(),
+                    is_direct: e.proxy.is_none(),
+                    state: kind,
+                    rtt_ms: rtt.get(&e.id).map(|v| *v as u32),
+                    persona_host: persona.get(&e.id).cloned(),
+                }
+            })
+            .collect()
+    }
+
+    /// Sticky fetch lane for a host. First call picks and
+    /// remembers; later calls return the same exit while it
+    /// stays alive and unburned for this host. Direct is last
+    /// resort only (protect the home IP).
+    pub fn pick_fetch(&self, host: &str, direct_ok: bool) -> Option<Egress> {
+        if host.is_empty() {
+            return None;
+        }
+        let sticky_id = self
+            .sticky
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(host)
+            .cloned();
+        if let Some(id) = sticky_id {
+            if !self.is_dead(&id)
+                && !self.pair_burned(host, &id)
+                && !self.pair_suspect(host, &id)
+                && self.persona_lane_ok(host, &id)
+                && let Some(eg) = self.egresses.iter().find(|e| e.id == id)
+            {
+                return Some(eg.clone());
+            }
+            self.sticky
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(host);
+        }
+        // Prefer a healthy, non-dead proxy that is not burned for
+        // this host and not exclusively bound to another persona.
+        // Unknown RTT counts as healthy (optimistic, matches pick()).
+        let mut best: Option<&Egress> = None;
+        let mut best_score = 0u8;
+        for e in &self.egresses {
+            if e.proxy.is_none() {
+                continue;
+            }
+            if self.is_dead(&e.id) || self.pair_burned(host, &e.id) {
+                continue;
+            }
+            if !self.persona_lane_ok(host, &e.id) {
+                continue;
+            }
+            // 0 = this host's pair is in probation after a block:
+            // never win against a clean lane (rotation must move).
+            let score = if self.pair_suspect(host, &e.id) {
+                0
+            } else if self.rtt_ms(&e.id).is_some_and(|ms| ms >= Self::slow_rtt_ms()) {
+                1
+            } else {
+                2
+            };
+            if score > best_score {
+                best = Some(e);
+                best_score = score;
+            }
+        }
+        if let Some(e) = best {
+            self.sticky
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(host.to_string(), e.id.clone());
+            return Some(e.clone());
+        }
+        if direct_ok {
+            return self.egresses.first().cloned();
+        }
+        None
+    }
+
+    /// Drop the host's sticky lane so the next pick rotates.
+    /// Does not change health: rotation is the signal.
+    pub fn rotate_fetch(&self, host: &str) {
+        self.sticky
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(host);
+    }
+
+    /// 429 / challenge on this host+lane: burn the pair and rotate.
+    pub fn note_fetch_rate_limited(&self, host: &str, egress_id: &str) {
+        self.report_blocked(host, egress_id);
+        self.rotate_fetch(host);
+    }
+
+    /// Soft timeout / slow: pair-scoped probation + drop stickiness.
+    /// No global bench (the line may be fine for other hosts).
+    pub fn note_fetch_timeout(&self, host: &str, egress_id: &str) {
+        self.report_blocked(host, egress_id);
+        self.rotate_fetch(host);
+    }
+
+    /// CONNECT-dead or auth on the fetch path: global bench + rotate.
+    pub fn note_fetch_dead(&self, host: &str, egress_id: &str) {
+        self.report_dead(egress_id);
+        self.rotate_fetch(host);
+    }
+
+    pub fn note_fetch_auth_fail(&self, host: &str, egress_id: &str) {
+        self.report_auth_fail(egress_id);
+        self.rotate_fetch(host);
+    }
+
+    /// Exclusive persona bind: lane → host. A second host cannot
+    /// claim a lane already bound.
+    pub fn bind_persona_lane(&self, host: &str, egress_id: &str) {
+        if egress_id == "direct" || host.is_empty() {
+            return;
+        }
+        self.persona_lanes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(egress_id.to_string(), host.to_string());
+        self.sticky
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(host.to_string(), egress_id.to_string());
+    }
+
+    /// Free every lane bound to this host (quarantine / remint).
+    pub fn release_persona_lane(&self, host: &str) {
+        self.persona_lanes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, h| h != host);
+        self.sticky
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(host);
+    }
+
+    /// False when the lane is exclusively bound to a different host.
+    pub fn persona_lane_ok(&self, host: &str, egress_id: &str) -> bool {
+        match self
+            .persona_lanes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(egress_id)
+        {
+            None => true,
+            Some(h) => h == host,
+        }
+    }
+
+    /// Pick a lane for a new persona mint: alive, not burned for
+    /// this host, not bound to a foreign persona.
+    pub fn pick_persona_lane(&self, host: &str) -> Option<Egress> {
+        if host.is_empty() || !self.has_proxies() {
+            return None;
+        }
+        // Reuse this host's existing bind when still healthy.
+        let bound = self
+            .sticky
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(host)
+            .cloned();
+        if let Some(id) = bound
+            && !self.is_dead(&id)
+            && !self.pair_burned(host, &id)
+            && self.persona_lane_ok(host, &id)
+            && let Some(eg) = self.egresses.iter().find(|e| e.id == id)
+        {
+            return Some(eg.clone());
+        }
+        for e in &self.egresses {
+            if e.proxy.is_none()
+                || self.is_dead(&e.id)
+                || self.pair_burned(host, &e.id)
+                || !self.persona_lane_ok(host, &e.id)
+            {
+                continue;
+            }
+            return Some(e.clone());
+        }
+        None
+    }
+
     /// Pacing with jitter: this (engine, egress) pair is
     /// not hit more than once per randomized interval.
     /// The premium lane paces slower : protect the home IP.
+    /// Slow lanes (high RTT EWMA) get a small extra gap.
     pub async fn pace(&self, engine: &str, egress_id: &str) {
         let (base, jit) = if egress_id == "direct" {
             (DIRECT_MIN_INTERVAL, DIRECT_JITTER_MS)
         } else {
             (MIN_INTERVAL, JITTER_MS)
         };
-        let interval = base + Duration::from_millis(jitter(jit));
+        let slow_extra = match self.rtt_ms(egress_id) {
+            Some(ms) if ms >= Self::slow_rtt_ms() => {
+                Duration::from_millis(((ms - Self::slow_rtt_ms()) / 8.0).min(400.0) as u64)
+            }
+            _ => Duration::ZERO,
+        };
+        let interval = base + Duration::from_millis(jitter(jit)) + slow_extra;
         let gate = {
             let mut gates = self
                 .pacing
@@ -536,6 +888,29 @@ impl EgressPool {
             tokio::time::sleep(interval.saturating_sub(at.elapsed())).await;
         }
         *last = Some(Instant::now());
+    }
+}
+
+/// Local-only lane row for doctor --deep / status.
+#[derive(Debug, Clone)]
+pub struct LaneSummary {
+    pub id: String,
+    pub is_direct: bool,
+    /// ok | slow | suspect | probation | burned | dead | auth
+    pub state: String,
+    pub rtt_ms: Option<u32>,
+    pub persona_host: Option<String>,
+}
+
+fn rank(state: &str) -> u8 {
+    match state {
+        "ok" => 0,
+        "slow" => 1,
+        "probation" => 2,
+        "suspect" => 3,
+        "burned" => 4,
+        "dead" | "auth" => 5,
+        _ => 0,
     }
 }
 
@@ -671,6 +1046,145 @@ mod pacing_tests {
         unsafe {
             std::env::remove_var("DONSETCH_CACHE_DIR");
             std::env::remove_var("DONSETCH_NO_EGRESS_PERSIST");
+        }
+    }
+
+    // ── A2: fetch stickiness, rotation, persona bind, RTT ──
+    //
+    // Isolate the cache dir: EgressPool::new loads egress-health.json,
+    // and a previous run's benches for these loopback ports would make
+    // pick_fetch return None. nextest is process-per-test; the env is
+    // set before the first cfg()/pool touch.
+
+    fn isolate_cache(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "donsetch-egress-a2-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe {
+            std::env::set_var("DONSETCH_CACHE_DIR", &dir);
+        }
+        dir
+    }
+
+    #[test]
+    fn pick_fetch_is_sticky_until_rotate() {
+        let dir = isolate_cache("sticky");
+        let p1 = Proxy::parse("http://127.0.0.1:24001").unwrap();
+        let p2 = Proxy::parse("http://127.0.0.1:24002").unwrap();
+        let pool = EgressPool::new(vec![p1, p2]);
+        let a = pool.pick_fetch("example.com", false).expect("proxy lane");
+        let b = pool.pick_fetch("example.com", false).expect("proxy lane");
+        assert_eq!(a.id, b.id, "same host must stick to the same lane");
+        pool.note_fetch_rate_limited("example.com", &a.id);
+        let c = pool.pick_fetch("example.com", false).expect("rotated");
+        assert_ne!(
+            c.id, a.id,
+            "429 must rotate off the burned lane (got the same one again)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe {
+            std::env::remove_var("DONSETCH_CACHE_DIR");
+        }
+    }
+
+    #[test]
+    fn pick_fetch_skips_dead_lane() {
+        let dir = isolate_cache("dead");
+        let p1 = Proxy::parse("http://127.0.0.1:24011").unwrap();
+        let p2 = Proxy::parse("http://127.0.0.1:24012").unwrap();
+        let id1 = p1.id();
+        let pool = EgressPool::new(vec![p1, p2]);
+        pool.report_dead(&id1);
+        let eg = pool.pick_fetch("example.com", false).expect("live lane");
+        assert_ne!(eg.id, id1, "dead lane must never be assigned to fetch");
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe {
+            std::env::remove_var("DONSETCH_CACHE_DIR");
+        }
+    }
+
+    #[test]
+    fn persona_lane_is_exclusive_across_hosts() {
+        let dir = isolate_cache("persona-ex");
+        let p1 = Proxy::parse("http://127.0.0.1:24021").unwrap();
+        let p2 = Proxy::parse("http://127.0.0.1:24022").unwrap();
+        let id1 = p1.id();
+        let id2 = p2.id();
+        let pool = EgressPool::new(vec![p1, p2]);
+        pool.bind_persona_lane("a.example", &id1);
+        assert!(!pool.persona_lane_ok("b.example", &id1));
+        assert!(pool.persona_lane_ok("a.example", &id1));
+        let for_b = pool.pick_persona_lane("b.example").expect("other lane");
+        assert_eq!(for_b.id, id2, "foreign-persona lane must not be reused");
+        pool.release_persona_lane("a.example");
+        assert!(pool.persona_lane_ok("b.example", &id1), "release frees the bind");
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe {
+            std::env::remove_var("DONSETCH_CACHE_DIR");
+        }
+    }
+
+    #[test]
+    fn persona_mint_never_takes_burned_lane() {
+        let dir = isolate_cache("persona-burn");
+        let p1 = Proxy::parse("http://127.0.0.1:24031").unwrap();
+        let id1 = p1.id();
+        let pool = EgressPool::new(vec![p1]);
+        pool.report_blocked("a.example", &id1);
+        pool.report_blocked("a.example", &id1);
+        assert!(
+            pool.pick_persona_lane("a.example").is_none(),
+            "burned pair must not mint a persona on that lane"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe {
+            std::env::remove_var("DONSETCH_CACHE_DIR");
+        }
+    }
+
+    #[test]
+    fn rtt_ewma_moves_and_lane_summary_flags_slow() {
+        let dir = isolate_cache("rtt");
+        let p = Proxy::parse("http://127.0.0.1:24041").unwrap();
+        let id = p.id();
+        let pool = EgressPool::new(vec![p]);
+        pool.observe_rtt(&id, Duration::from_millis(3000));
+        pool.observe_rtt(&id, Duration::from_millis(3000));
+        let rtt = pool.rtt_ms(&id).expect("rtt recorded");
+        assert!(rtt >= 2500.0, "slow sample must land in EWMA, got {rtt}");
+        let summary = pool.lane_summary();
+        let row = summary.iter().find(|s| s.id == id).expect("lane row");
+        assert_eq!(row.state, "slow", "lane_summary must flag slow lanes");
+        assert!(row.rtt_ms.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe {
+            std::env::remove_var("DONSETCH_CACHE_DIR");
+        }
+    }
+
+    #[test]
+    fn note_fetch_timeout_rotates_without_global_bench() {
+        let dir = isolate_cache("timeout");
+        let p1 = Proxy::parse("http://127.0.0.1:24051").unwrap();
+        let p2 = Proxy::parse("http://127.0.0.1:24052").unwrap();
+        let pool = EgressPool::new(vec![p1, p2]);
+        let first = pool.pick_fetch("example.com", false).unwrap();
+        pool.note_fetch_timeout("example.com", &first.id);
+        assert!(
+            !pool.is_dead(&first.id),
+            "timeout must not globally bench the lane"
+        );
+        let next = pool.pick_fetch("example.com", false).unwrap();
+        assert_ne!(next.id, first.id, "timeout must rotate stickiness");
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe {
+            std::env::remove_var("DONSETCH_CACHE_DIR");
         }
     }
 }

@@ -144,7 +144,9 @@ fn is_engine_fault(status: &str) -> bool {
 
 pub struct Searcher {
     fetcher: Fetcher,
-    pool: EgressPool,
+    /// Shared with crawl + fetch (v4 A2): one health world for
+    /// every proxied path. Clone of the daemon's Arc.
+    pool: std::sync::Arc<EgressPool>,
     google: engines::google_wml::ProfileSelector,
     /// engine -> trust EWMA (1.0 seed; 0.2..2.0 clamp).
     /// Persisted to disk: an engine that learned "this walled me"
@@ -238,6 +240,11 @@ pub struct SearchOutcome {
 
 impl Searcher {
     pub fn new(fetcher: Fetcher, pool: EgressPool) -> Self {
+        Self::new_shared(fetcher, std::sync::Arc::new(pool))
+    }
+
+    /// Share one process-wide pool (daemon path).
+    pub fn new_shared(fetcher: Fetcher, pool: std::sync::Arc<EgressPool>) -> Self {
         let (trust, failures) = load_health_disk();
         Self {
             fetcher,
@@ -252,6 +259,11 @@ impl Searcher {
             prewarms: std::sync::Arc::new(std::sync::Mutex::new(PrewarmCache::new())),
             ghost: None,
         }
+    }
+
+    /// The shared egress pool (crawl/fetch attach the same Arc).
+    pub fn egress_pool(&self) -> &std::sync::Arc<EgressPool> {
+        &self.pool
     }
 
     /// Attach the browser-render capability (cascade lane).
@@ -386,7 +398,8 @@ impl Searcher {
     /// Proxy preflight: probe every proxy at startup so
     /// dead lines are benched BEFORE a query ever gets
     /// assigned to them. Runs in the background; the first
-    /// queries just use healthy lanes.
+    /// queries just use healthy lanes. Successful probes also
+    /// seed the per-lane RTT EWMA (v4 A2).
     pub fn preflight(self: &Arc<Self>) {
         let this = Arc::clone(self);
         tokio::spawn(async move {
@@ -395,6 +408,7 @@ impl Searcher {
             let mut dead = 0usize;
             for proxy in proxies {
                 let id = proxy.id();
+                let started = Instant::now();
                 let probe = this.fetcher.fetch_once_via(
                     "https://api.ipify.org/",
                     &[],
@@ -403,7 +417,9 @@ impl Searcher {
                     None,
                 );
                 match tokio::time::timeout(Duration::from_secs(6), probe).await {
-                    Ok(Ok(o)) if o.status == 200 => {}
+                    Ok(Ok(o)) if o.status == 200 => {
+                        this.pool.observe_rtt(&id, started.elapsed());
+                    }
                     Ok(Err(e)) if format!("{e}").contains("CONNECT -> 407") => {
                         this.pool.report_auth_fail(&id);
                     }
@@ -607,10 +623,10 @@ impl Searcher {
         // is shared, not exclusive.
         let context = tasks::EngineContext {
             fetcher: &self.fetcher,
-            pool: &self.pool,
+            pool: self.pool.as_ref(),
             google: &self.google,
         };
-        for (engine, q, eg) in assign_egresses(&self.pool, assignments, &mut used_egresses) {
+        for (engine, q, eg) in assign_egresses(self.pool.as_ref(), assignments, &mut used_egresses) {
             futures.push(Box::pin(engine_task(engine, q, eg.id, eg.proxy, context)));
         }
         // Verticals: direct, friendly APIs.

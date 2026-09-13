@@ -79,6 +79,10 @@ section!(ProxySection {
     no_proxy: String = String::new(),
     pool: Vec<String> = Vec::new(),
     egress_persist: bool = true,
+    /// When a proxy pool exists, web_fetch sticks to one lane per
+    /// host and rotates on 429/407/dead/timeout. Kill: false /
+    /// DONSETCH_NO_FETCH_ROTATE (fetch falls back to env/slot only).
+    fetch_rotate: bool = true,
 });
 
 section!(TlsSection {
@@ -1144,6 +1148,14 @@ fn legacy_layer() -> (VMap, Vec<String>) {
             "DONSETCH_NO_EGRESS_PERSIST",
         );
     }
+    if legacy_flag("DONSETCH_NO_FETCH_ROTATE") {
+        put(
+            &mut m,
+            "proxy.fetch_rotate",
+            false.into(),
+            "DONSETCH_NO_FETCH_ROTATE",
+        );
+    }
 
     // debug
     if std::env::var_os("DONGHOST_DEBUG").is_some() {
@@ -1356,6 +1368,13 @@ pub(crate) fn fieldbook() -> &'static Fieldbook {
             FieldKind::Bool,
             "true",
             "persist proxy lane health across restarts",
+        ),
+        (
+            "proxy",
+            "fetch_rotate",
+            FieldKind::Bool,
+            "true",
+            "sticky-per-host fetch lanes when a proxy pool exists; rotate on 429/407/dead/timeout",
         ),
         // tls
         (
@@ -1771,6 +1790,7 @@ const LEGACY_VARS: &[&str] = &[
     "DONSETCH_NO_ENV_PROXY",
     "DONSEEK_PROXIES",
     "DONSETCH_NO_EGRESS_PERSIST",
+    "DONSETCH_NO_FETCH_ROTATE",
     "DONSETCH_NO_ADAPTERS",
     "DONSETCH_ADAPTER_DUMP",
     "DONSETCH_NO_CRAWL_SHAPE",
@@ -2268,6 +2288,7 @@ pub(crate) fn legacy_target_of(name: &str) -> (&'static str, &'static str) {
         "DONSETCH_NO_ENV_PROXY" => ("proxy", "from_environment"),
         "DONSEEK_PROXIES" => ("proxy", "pool"),
         "DONSETCH_NO_EGRESS_PERSIST" => ("proxy", "egress_persist"),
+        "DONSETCH_NO_FETCH_ROTATE" => ("proxy", "fetch_rotate"),
         "DONSETCH_NO_ADAPTERS" => ("fetch", "adapters"),
         "DONSETCH_ADAPTER_DUMP" => ("fetch", "adapter_dump_dir"),
         "DONSETCH_NO_CRAWL_SHAPE" => ("fetch", "crawl_shape"),
@@ -3168,6 +3189,28 @@ mod tests {
                     .any(|warning| warning == "ignoring DONSETCH_HTTP_TOKEN: not valid UTF-8")
             );
         }
+        drop(guard);
+    }
+
+    #[test]
+    fn fetch_rotate_defaults_on_and_honors_kill_switch() {
+        let guard = clean_env();
+        set_env("DONSETCH_NO_CONFIG_FILE", "1");
+        let loaded = load().expect("defaults");
+        assert!(
+            loaded.config.proxy.fetch_rotate,
+            "proxy.fetch_rotate must default true"
+        );
+        set_env("DONSETCH_NO_FETCH_ROTATE", "1");
+        let loaded = load().expect("kill switch");
+        assert!(
+            !loaded.config.proxy.fetch_rotate,
+            "DONSETCH_NO_FETCH_ROTATE must map to proxy.fetch_rotate=false"
+        );
+        assert_eq!(
+            legacy_target_of("DONSETCH_NO_FETCH_ROTATE"),
+            ("proxy", "fetch_rotate")
+        );
         drop(guard);
     }
 

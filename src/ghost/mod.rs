@@ -661,14 +661,23 @@ impl Ghost {
             chrome_args.push("--no-sandbox".into());
             chrome_args.push("--disable-setuid-sandbox".into());
         }
-        // ── HTTP proxy (env var) ──
-        // If HTTP_PROXY/HTTPS_PROXY/ALL_PROXY is set, route the
-        // Ghost browser through the same proxy as tier 1. Chrome
-        // handles proxy auth via its own dialog (which we never see
-        // in headless/off-screen mode), so for authenticated proxies
-        // the user may need a proxy-auth extension. For unauthenticated
-        // proxies this just works.
-        if let Some(p) = crate::transport::proxy::from_env_for("https://ghost.local/") {
+        // ── HTTP proxy ──
+        // Prefer a sticky lane from the shared egress pool (v4 A2)
+        // so the browser exit matches the rest of the fabric. Fall
+        // back to env/slot. Chrome handles proxy auth via its own
+        // dialog (which we never see in headless/off-screen mode),
+        // so for authenticated proxies the user may need a
+        // proxy-auth extension. For unauthenticated proxies this
+        // just works.
+        let pool_proxy = crate::search::egress::global().and_then(|pool| {
+            if !pool.has_proxies() || !crate::config::cfg().proxy.fetch_rotate {
+                return None;
+            }
+            pool.pick_fetch("ghost.local", true).and_then(|e| e.proxy)
+        });
+        if let Some(p) = pool_proxy
+            .or_else(|| crate::transport::proxy::from_env_for("https://ghost.local/"))
+        {
             chrome_args.push(format!("--proxy-server={}", p.chrome_proxy_arg()));
         }
         // ── Stealth mode selection ──

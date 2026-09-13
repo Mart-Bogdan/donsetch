@@ -1022,8 +1022,12 @@ impl GhostState {
 
     /// Burn a persona (detection event, operator request). The next
     /// ensure_persona mints a fresh identity with a bumped
-    /// generation; the burned one is never reused.
+    /// generation; the burned one is never reused. Also frees any
+    /// exclusive egress bind so the lane can serve a new mint.
     pub fn quarantine_persona(&mut self, host: &str, reason: &str) {
+        if let Some(pool) = crate::search::egress::global() {
+            pool.release_persona_lane(host);
+        }
         if !route_memory_enabled() || route_memory_readonly() {
             return;
         }
@@ -1031,6 +1035,52 @@ impl GhostState {
             p.quarantined_at = Some(now());
             p.quarantine_reason = Some(reason.to_string());
             self.save();
+        }
+    }
+
+    /// Stamp the persona's bound exit (v4 A2). Returns true when
+    /// the stamp changed. A burned or foreign-persona lane is never
+    /// assigned: the pool's pick_persona_lane already excludes them.
+    pub fn bind_persona_proxy(&mut self, host: &str, lane_id: Option<String>) -> bool {
+        if !route_memory_enabled() || route_memory_readonly() {
+            return false;
+        }
+        let Some(p) = self.personas.get_mut(host) else {
+            return false;
+        };
+        if p.proxy_id == lane_id {
+            return false;
+        }
+        p.proxy_id = lane_id;
+        self.save();
+        true
+    }
+
+    /// Ensure this host's persona is bound to a live exclusive
+    /// egress lane (pool present). Remints via quarantine when the
+    /// bound lane is burned or foreign. No-op when the pool is
+    /// empty or route memory is off.
+    pub fn ensure_persona_egress(&mut self, host: &str) {
+        let Some(pool) = crate::search::egress::global() else {
+            return;
+        };
+        if !pool.has_proxies() || !crate::config::cfg().proxy.fetch_rotate {
+            return;
+        }
+        let bound = self.personas.get(host).and_then(|p| p.proxy_id.clone());
+        if let Some(id) = bound {
+            let ok = pool.persona_lane_ok(host, &id) && !pool.is_dead(&id);
+            if ok {
+                return;
+            }
+            // Foreign or burned: burn the identity, free the lane,
+            // and let the next ensure mint generation+1.
+            pool.release_persona_lane(host);
+            self.quarantine_persona(host, "bound egress burned or foreign");
+        }
+        if let Some(eg) = pool.pick_persona_lane(host) {
+            pool.bind_persona_lane(host, &eg.id);
+            self.bind_persona_proxy(host, Some(eg.id));
         }
     }
 

@@ -60,6 +60,10 @@ pub struct Fetcher {
     pool: Mutex<Pool>,
     jar: Mutex<CookieJar>,
     cache: Mutex<RevalidationCache>,
+    /// Shared egress fabric (v4 A2). When present and a proxy pool
+    /// is configured, fetch sticks to one lane per host and rotates
+    /// on 429/407/dead/timeout. None = historical env/slot path.
+    egress: Option<std::sync::Arc<crate::search::egress::EgressPool>>,
 }
 
 impl Fetcher {
@@ -84,7 +88,18 @@ impl Fetcher {
             pool: Mutex::new(Pool::new()),
             jar: Mutex::new(CookieJar::new()),
             cache: Mutex::new(RevalidationCache::new()),
+            egress: None,
         })
+    }
+
+    /// Attach the process-wide egress pool so fetch can stick to a
+    /// host lane and rotate on rate-limit signals (v4 A2).
+    pub fn with_egress(
+        mut self,
+        pool: std::sync::Arc<crate::search::egress::EgressPool>,
+    ) -> Self {
+        self.egress = Some(pool);
+        self
     }
 
     #[allow(dead_code)] // MCP surface will need this.
@@ -255,6 +270,29 @@ impl Fetcher {
         let mut redirects = 0u8;
         let mut first_request = true;
 
+        // v4 A2: pool-aware fetch lane. When no explicit proxy is
+        // passed and a pool exists, stick to one exit per host for
+        // the whole redirect chain (never mid-200-session) and rotate
+        // on 429 / 407 / connect-dead / timeout. Without a pool this
+        // stays the historical env/slot path: one request does not
+        // rate-limit, and proxies cost bandwidth + TLS fidelity.
+        let fetch_host = url::Url::parse(url_str)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+            .unwrap_or_default();
+        let pool_lane = if proxy.is_none()
+            && crate::config::cfg().proxy.fetch_rotate
+            && let Some(pool) = &self.egress
+            && pool.has_proxies()
+        {
+            pool.pick_fetch(&fetch_host, true)
+        } else {
+            None
+        };
+        let pool_lane_id = pool_lane.as_ref().map(|e| e.id.clone());
+        let use_pool_lane = pool_lane.is_some();
+        let pinned_pool = pool_lane.as_ref().and_then(|e| e.proxy.as_ref());
+
         // Resolve env-var proxy (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY)
         // when no explicit proxy lane is passed. This follows the
         // curl/wget convention so users can route all DonSeTch
@@ -262,21 +300,16 @@ impl Fetcher {
         // for the CURRENT url at every hop (curl parity, E15: a
         // redirect to a NO_PROXY-covered host dials direct instead of
         // riding the env proxy for the rest of the chain). Explicit
-        // proxy lanes stay pinned for the whole chain by design.
-        // Proxies are NOT used for single-URL fetch by default:
-        // one request to one URL does not rate-limit, and routing
-        // through a proxy wastes bandwidth and hurts the TLS
-        // fingerprint (residential proxies don't use our Chrome-true
-        // BoringSSL stack). Proxies belong on search (many engines)
-        // and crawl (many pages, same host) where rate limits bite.
+        // proxy lanes and pool sticky lanes stay pinned for the whole
+        // chain by design.
 
         loop {
-            let env_proxy = if proxy.is_none() {
+            let env_proxy = if proxy.is_none() && !use_pool_lane {
                 crate::transport::proxy::from_env_for(&current)
             } else {
                 None
             };
-            let effective_proxy = proxy.or(env_proxy.as_ref());
+            let effective_proxy = proxy.or(pinned_pool).or(env_proxy.as_ref());
             // Referer applies to the initial request only.
             // Redirects get no referer (avoids cross-origin leak).
             let ref_arg = if first_request { referer } else { None };
@@ -287,9 +320,39 @@ impl Fetcher {
             // sends them.
             let hop_conditional: &[(String, String)] =
                 if first_request { &conditional } else { &[] };
-            let mut out = self
+            let hop_started = Instant::now();
+            let mut out = match self
                 .fetch_once_via(&current, hop_conditional, effective_proxy, use_jar, ref_arg)
-                .await?;
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    if let (Some(pool), Some(id)) = (&self.egress, &pool_lane_id) {
+                        let msg = e.to_string();
+                        if matches!(e, FetchError::Timeout) || msg.contains("timed out") {
+                            pool.note_fetch_timeout(&fetch_host, id);
+                        } else if msg.contains("CONNECT -> 407") {
+                            pool.note_fetch_auth_fail(&fetch_host, id);
+                        } else if matches!(e, FetchError::Io(_) | FetchError::Tls(_))
+                            || msg.contains("connection")
+                            || msg.contains("connect")
+                        {
+                            pool.note_fetch_dead(&fetch_host, id);
+                        }
+                    }
+                    return Err(e);
+                }
+            };
+            if let (Some(pool), Some(id)) = (&self.egress, &pool_lane_id) {
+                match out.status {
+                    429 => pool.note_fetch_rate_limited(&fetch_host, id),
+                    200 | 304 => {
+                        pool.report_ok(&fetch_host, id);
+                        pool.observe_rtt(id, hop_started.elapsed());
+                    }
+                    _ => {}
+                }
+            }
             // Cookie store for this hop lives in fetch_once_via_class
             // (v4 phase 2.1): the primitive owns the jar-write, so the
             // cookie-warm retry below can already ride cookies this

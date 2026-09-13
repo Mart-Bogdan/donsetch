@@ -127,6 +127,10 @@ pub async fn run() {
     // 2c. Proxy pool + persisted lane health (local-only).
     report!("Proxy pool", check_proxy_pool());
 
+    // 2d. Egress lanes: local health always; --deep live-probes
+    // every configured proxy and prints one line per lane.
+    report!("Egress lanes", check_egress_lanes(deep).await);
+
     // 3. TLS fingerprint (fast enough to keep in fast mode).
     if let Some(ref fm) = fetcher {
         report!("TLS fingerprint", check_tls(fm).await);
@@ -413,6 +417,102 @@ fn check_proxy_pool() -> CheckResult {
     bits.push(format!(
         "learned benches: {burned} burned pair marker(s), {dead_n} dead lane(s)"
     ));
+    CheckResult::Pass(bits.join(" · "))
+}
+
+/// Egress fabric lanes (v4 A2). Fast mode: local health summary
+/// from the shared pool / persisted file. --deep: live-probe every
+/// configured proxy (connect + small GET) and name the fix.
+async fn check_egress_lanes(deep: bool) -> CheckResult {
+    let pool = crate::search::egress::global().unwrap_or_else(|| {
+        std::sync::Arc::new(crate::search::egress::EgressPool::from_env())
+    });
+    let summary = pool.lane_summary();
+    if summary.is_empty() || (summary.len() == 1 && summary[0].is_direct) {
+        return CheckResult::Pass(
+            "direct-only egress (no proxy pool; search/crawl/fetch share the home IP)"
+                .into(),
+        );
+    }
+    let mut bits: Vec<String> = Vec::new();
+    let mut bad = 0usize;
+    for row in &summary {
+        let name = if row.is_direct { "direct" } else { &row.id };
+        let rtt = row
+            .rtt_ms
+            .map(|ms| format!("{ms}ms"))
+            .unwrap_or_else(|| "-".into());
+        let persona = row
+            .persona_host
+            .as_deref()
+            .map(|h| format!(" persona={h}"))
+            .unwrap_or_default();
+        let mut line = format!("{name}: {} rtt={rtt}{persona}", row.state);
+        if matches!(row.state.as_str(), "dead" | "auth" | "burned") {
+            bad += 1;
+            if row.state == "auth" {
+                line.push_str(" · fix: `donsetch proxy test <url>` then update credentials");
+            } else {
+                line.push_str(" · fix: `donsetch proxy check`; replace dead lines");
+            }
+        }
+        bits.push(line);
+    }
+
+    if deep {
+        let proxies = pool.proxies();
+        if !proxies.is_empty() {
+            let results = crate::cli::proxy::probe_all(&proxies).await;
+            let mut dead = 0usize;
+            let mut slow = 0usize;
+            for (px, r) in proxies.iter().zip(results.iter()) {
+                if r.alive {
+                    pool.observe_rtt(&px.id(), r.latency);
+                    if r.latency.as_millis() as u64
+                        >= crate::search::egress::EgressPool::slow_rtt_ms() as u64
+                    {
+                        slow += 1;
+                        bits.push(format!(
+                            "{}: live slow {} (exit {})",
+                            px.id(),
+                            r.latency.as_millis(),
+                            r.exit_ip.as_deref().unwrap_or("?")
+                        ));
+                    }
+                } else {
+                    dead += 1;
+                    pool.report_dead(&px.id());
+                    bits.push(format!(
+                        "{}: live dead · {}",
+                        px.id(),
+                        r.error.as_deref().unwrap_or("probe failed")
+                    ));
+                }
+            }
+            // All dead = probe endpoint died, not the pool.
+            if !proxies.is_empty() && dead == proxies.len() {
+                pool.revive_all();
+                bits.push(
+                    "all lanes failed the live probe (likely api.ipify.org down); benches cleared"
+                        .into(),
+                );
+                return CheckResult::Warn(bits.join(" · "));
+            }
+            if dead > 0 {
+                return CheckResult::Fail(
+                    bits.join(" · "),
+                    "replace or repair the dead proxy lines, then re-run doctor --deep".into(),
+                );
+            }
+            if slow > 0 {
+                return CheckResult::Warn(bits.join(" · "));
+            }
+        }
+    }
+
+    if bad > 0 {
+        return CheckResult::Warn(bits.join(" · "));
+    }
     CheckResult::Pass(bits.join(" · "))
 }
 

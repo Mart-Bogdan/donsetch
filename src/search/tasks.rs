@@ -110,6 +110,7 @@ pub(super) async fn engine_task_with_budget(
         Ok(Ok(o)) => o,
     };
     let ms = started.elapsed().as_millis() as u64;
+    pool.observe_rtt(&egress_id, started.elapsed());
     // The deadline covers the FETCH only; the decode + DOM parse
     // below run synchronously after it. A hostile (or
     // misconfigured-proxy) 64 MiB 200 would then stall the whole

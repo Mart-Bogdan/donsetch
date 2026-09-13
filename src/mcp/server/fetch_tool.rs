@@ -727,6 +727,9 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
         // re-mints automatically.
         let caps = crate::persona::PersonaCaps::from_profile(daemon.fetcher.profile());
         state.ensure_persona(&host, &caps);
+        // v4 A2: bind an exclusive egress lane to this persona
+        // (no burned / foreign-persona reuse).
+        state.ensure_persona_egress(&host);
     }
     let route = if tier == "2" && !is_pdf_url && !adapter_host {
         RouteDecision::SkipToSolve
