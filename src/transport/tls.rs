@@ -110,8 +110,8 @@ pub enum HandshakeProfile {
 /// The tls.mldsa_sigalgs kill switch strips them on every wire.
 pub(crate) fn effective_sigalgs(profile: &BrowserProfile, handshake: HandshakeProfile) -> String {
     let sig = profile.tls.sigalgs;
-    let want_mldsa = handshake == HandshakeProfile::ChromeTrue
-        && crate::config::cfg().tls.mldsa_sigalgs;
+    let want_mldsa =
+        handshake == HandshakeProfile::ChromeTrue && crate::config::cfg().tls.mldsa_sigalgs;
     if want_mldsa && sig.contains("mldsa") {
         return sig.to_string();
     }

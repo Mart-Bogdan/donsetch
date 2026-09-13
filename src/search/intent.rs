@@ -284,8 +284,21 @@ pub fn trim_verticals_for_stress(verticals: Vec<&'static str>, stress: f64) -> V
 /// tech. Avoids burning the API on entity names ("Linus Torvalds").
 fn so_qaish(q: &str, toks: &[&str]) -> bool {
     const QWORDS: &[&str] = &[
-        "how", "why", "what", "when", "which", "error", "exception", "failed", "cannot",
-        "undefined", "fix", "debug", "traceback", "panic", "bug",
+        "how",
+        "why",
+        "what",
+        "when",
+        "which",
+        "error",
+        "exception",
+        "failed",
+        "cannot",
+        "undefined",
+        "fix",
+        "debug",
+        "traceback",
+        "panic",
+        "bug",
     ];
     QWORDS.iter().any(|w| has_phrase(toks, w))
         || q.contains('?')
@@ -296,10 +309,40 @@ fn so_qaish(q: &str, toks: &[&str]) -> bool {
 /// hit developer.mozilla.org.
 fn mdnish(_q: &str, toks: &[&str]) -> bool {
     const WEB: &[&str] = &[
-        "html", "css", "javascript", "typescript", "dom", "web", "browser", "fetch", "cors",
-        "flexbox", "grid", "http", "https", "cookie", "localStorage", "webpack", "vite",
-        "react", "vue", "svelte", "node", "npm", "webassembly", "wasm", "svg", "canvas",
-        "service", "worker", "pwa", "progressive", "chrome", "firefox", "safari", "edge",
+        "html",
+        "css",
+        "javascript",
+        "typescript",
+        "dom",
+        "web",
+        "browser",
+        "fetch",
+        "cors",
+        "flexbox",
+        "grid",
+        "http",
+        "https",
+        "cookie",
+        "localStorage",
+        "webpack",
+        "vite",
+        "react",
+        "vue",
+        "svelte",
+        "node",
+        "npm",
+        "webassembly",
+        "wasm",
+        "svg",
+        "canvas",
+        "service",
+        "worker",
+        "pwa",
+        "progressive",
+        "chrome",
+        "firefox",
+        "safari",
+        "edge",
     ];
     toks.iter().any(|t| WEB.contains(t))
 }
@@ -308,11 +351,17 @@ fn mdnish(_q: &str, toks: &[&str]) -> bool {
 /// error dumps.
 fn hnish(q: &str, toks: &[&str]) -> bool {
     const NEWSY: &[&str] = &[
-        "release", "announce", "announced", "show", "launch", "launched", "ycombinator",
-        "hacker", "hn",
+        "release",
+        "announce",
+        "announced",
+        "show",
+        "launch",
+        "launched",
+        "ycombinator",
+        "hacker",
+        "hn",
     ];
-    NEWSY.iter().any(|s| q.contains(s))
-        || toks.len() <= 3 && toks.iter().any(|t| TECH.contains(t))
+    NEWSY.iter().any(|s| q.contains(s)) || toks.len() <= 3 && toks.iter().any(|t| TECH.contains(t))
 }
 
 /// Domain quality prior per intent: 0.0..1.0 bonus mass.

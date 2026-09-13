@@ -739,8 +739,8 @@ impl Ghost {
             }
             pool.pick_fetch("ghost.local", true).and_then(|e| e.proxy)
         });
-        if let Some(p) = pool_proxy
-            .or_else(|| crate::transport::proxy::from_env_for("https://ghost.local/"))
+        if let Some(p) =
+            pool_proxy.or_else(|| crate::transport::proxy::from_env_for("https://ghost.local/"))
         {
             chrome_args.push(format!("--proxy-server={}", p.chrome_proxy_arg()));
         }
@@ -959,8 +959,11 @@ impl Ghost {
         // so window-size and the layout viewport cannot disagree.
         {
             let (vw, vh) = wire.viewport;
-            let needs_metrics = cfg!(not(any(linux_like, target_os = "macos", target_os = "windows")))
-                || wire.viewport != (1920, 1080);
+            let needs_metrics = cfg!(not(any(
+                linux_like,
+                target_os = "macos",
+                target_os = "windows"
+            ))) || wire.viewport != (1920, 1080);
             if needs_metrics {
                 cdp.call(
                     Some(&session),

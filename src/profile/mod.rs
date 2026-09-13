@@ -330,7 +330,11 @@ pub fn accept_language_with_persona(host: &str, path: &str, persona_locale: &str
     // that far.
     let persona_locale = crate::persona::sanitize_locale(persona_locale);
     let persona_locale = persona_locale.as_str();
-    let plang = persona_locale.split('-').next().unwrap_or("").to_ascii_lowercase();
+    let plang = persona_locale
+        .split('-')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     if plang.len() < 2 || plang.len() > 3 || !plang.chars().all(|c| c.is_ascii_alphabetic()) {
         return base.to_string();
     }
@@ -663,11 +667,7 @@ mod locale_tests {
         assert!(al.starts_with("en-US"), "{al}");
         assert!(al.contains("ru-RU"), "TLD kept as secondary: {al}");
         // Hostile locale is sanitized, never interpolated raw.
-        let al = accept_language_with_persona(
-            "example.com",
-            "/",
-            "en-US\r\nX: y",
-        );
+        let al = accept_language_with_persona("example.com", "/", "en-US\r\nX: y");
         assert!(
             !al.contains('\r') && !al.contains('\n'),
             "CR/LF must never reach the header: {al:?}"

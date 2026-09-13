@@ -161,7 +161,10 @@ pub async fn run() {
         // Captive portal: generate_204 must stay 204. A hotel/airport
         // login page answering 200/302 is the classic "TLS works but
         // every fetch is a login form" failure.
-        report!("Captive portal", check_captive_portal(fetcher.as_ref()).await);
+        report!(
+            "Captive portal",
+            check_captive_portal(fetcher.as_ref()).await
+        );
     } else {
         cli::check_dim("Browser launch", "skipped (--deep to run)");
         cli::check_dim("Captive portal", "skipped (--deep to run)");
@@ -477,22 +480,22 @@ fn print_improve_loop() {
     let state = crate::ghost::cache::GhostState::load();
     let (hosts, walled, warm, cooldowns, flaky) = state.route_stats();
     let (t, ti, f) = crate::search::persist_load_for_status();
-    let low = t.values().filter(|&&x| x < 0.5).count()
-        + ti.values().filter(|&&x| x < 0.5).count();
+    let low = t.values().filter(|&&x| x < 0.5).count() + ti.values().filter(|&&x| x < 0.5).count();
     let warm_hits = state.pool_served_total + state.prewarmed_served_total;
     let (q_hosts, q_high, q_low) = crate::search::persist_load_quality_for_status();
     let (o_keys, o_demoted) = crate::search::persist_load_outcome_for_status();
     cli::print_kv("receipts", "");
-    println!(
-        "    hosts {hosts} · walled {walled} · warm-ready {warm} · warm-hits {warm_hits}"
-    );
+    println!("    hosts {hosts} · walled {walled} · warm-ready {warm} · warm-hits {warm_hits}");
     println!(
         "    cooldowns {cooldowns} · flaky {flaky} · probes {} · engine trust {}/{} low",
         state.probes_total,
         low,
         t.len() + ti.len()
     );
-    println!("    quarantined engines {f} · quality hosts {q_hosts} ({q_high} high / {q_low} low)", f = f.len());
+    println!(
+        "    quarantined engines {f} · quality hosts {q_hosts} ({q_high} high / {q_low} low)",
+        f = f.len()
+    );
     println!(
         "    outcome keys {o_keys} ({o_demoted} demoted) · outcome_feedback {}",
         if crate::config::cfg().search.outcome_feedback {
@@ -517,14 +520,12 @@ fn print_improve_loop() {
 /// from the shared pool / persisted file. --deep: live-probe every
 /// configured proxy (connect + small GET) and name the fix.
 async fn check_egress_lanes(deep: bool) -> CheckResult {
-    let pool = crate::search::egress::global().unwrap_or_else(|| {
-        std::sync::Arc::new(crate::search::egress::EgressPool::from_env())
-    });
+    let pool = crate::search::egress::global()
+        .unwrap_or_else(|| std::sync::Arc::new(crate::search::egress::EgressPool::from_env()));
     let summary = pool.lane_summary();
     if summary.is_empty() || (summary.len() == 1 && summary[0].is_direct) {
         return CheckResult::Pass(
-            "direct-only egress (no proxy pool; search/crawl/fetch share the home IP)"
-                .into(),
+            "direct-only egress (no proxy pool; search/crawl/fetch share the home IP)".into(),
         );
     }
     let mut bits: Vec<String> = Vec::new();
@@ -1270,11 +1271,7 @@ fn check_config_posture() -> CheckResult {
     if no_file {
         layers.push("env-only (NO_CONFIG_FILE)");
     } else if let Some(ref h) = home {
-        layers.push(if h.exists() {
-            "user toml"
-        } else {
-            "defaults"
-        });
+        layers.push(if h.exists() { "user toml" } else { "defaults" });
     } else {
         layers.push("defaults");
     }
@@ -1340,11 +1337,7 @@ fn check_search_health() -> CheckResult {
 }
 
 fn onoff(b: bool) -> &'static str {
-    if b {
-        "on"
-    } else {
-        "off"
-    }
+    if b { "on" } else { "off" }
 }
 
 /// Clearance state: TLS-session routes, link handles, cookie vault.
@@ -1437,10 +1430,7 @@ fn check_dns() -> CheckResult {
             } else {
                 let v6 = addrs.iter().any(|a| a.is_ipv6());
                 let note = if v6 { " (AAAA present)" } else { " (A only)" };
-                CheckResult::Pass(format!(
-                    "example.com → {} addr(s){note}",
-                    addrs.len()
-                ))
+                CheckResult::Pass(format!("example.com → {} addr(s){note}", addrs.len()))
             }
         }
         Err(e) => CheckResult::Fail(

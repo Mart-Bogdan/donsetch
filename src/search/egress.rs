@@ -723,7 +723,10 @@ impl EgressPool {
             // never win against a clean lane (rotation must move).
             let score = if self.pair_suspect(host, &e.id) {
                 0
-            } else if self.rtt_ms(&e.id).is_some_and(|ms| ms >= Self::slow_rtt_ms()) {
+            } else if self
+                .rtt_ms(&e.id)
+                .is_some_and(|ms| ms >= Self::slow_rtt_ms())
+            {
                 1
             } else {
                 2
@@ -1020,7 +1023,10 @@ mod pacing_tests {
             "burned (bing, proxy) pair must survive restart"
         );
         // Other engines still work on that lane after the restart.
-        assert_eq!(pool2.pick("yahoo", &[], false).map(|e| e.id), Some(id.clone()));
+        assert_eq!(
+            pool2.pick("yahoo", &[], false).map(|e| e.id),
+            Some(id.clone())
+        );
         let _ = std::fs::remove_dir_all(&dir);
         unsafe {
             std::env::remove_var("DONSETCH_CACHE_DIR");
@@ -1138,7 +1144,10 @@ mod pacing_tests {
         let for_b = pool.pick_persona_lane("b.example").expect("other lane");
         assert_eq!(for_b.id, id2, "foreign-persona lane must not be reused");
         pool.release_persona_lane("a.example");
-        assert!(pool.persona_lane_ok("b.example", &id1), "release frees the bind");
+        assert!(
+            pool.persona_lane_ok("b.example", &id1),
+            "release frees the bind"
+        );
         let _ = std::fs::remove_dir_all(&dir);
         unsafe {
             std::env::remove_var("DONSETCH_CACHE_DIR");

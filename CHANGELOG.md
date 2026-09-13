@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-V4 work in progress on `master`. Nothing below ships through a release
-channel until the v4.0.0 release train.
+Nothing yet.
+
+## [4.0.0] - 2026-09-13
+
+The agent web stack, rebuilt end to end. Same four tools, same
+zero-config `donsetch mcp` default. Faster, stealthier, more
+reliable, and honest about what it knows.
 
 ### Removed
 - `web_answer` (the evidence pack) and `web_memory` (the local vector
@@ -57,9 +62,9 @@ channel until the v4.0.0 release train.
   and cap captured output at 64 KiB.
 - Every runtime env read now flows through the typed config. The old
   env names keep their exact historical trigger semantics and still
-  work, but they are deprecated and will be removed at the v4
-  release; `donsetch doctor` lists the ones your shell still sets and
-  maps each to its config key.
+  work in 4.0, but they are deprecated; `donsetch doctor` lists the
+  ones your shell still sets and maps each to its config key. The
+  hard cut lands in a later minor once the migration is done.
 
 ### Added
 - **Egress fabric (v4 A):** search, crawl, fetch, and ghost share one

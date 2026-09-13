@@ -10,12 +10,10 @@
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G5Y624N5RE)
 
-> **These docs track `master`.** The current release is v3.6.7. The typed configuration (donsetch.toml, `config show`, `DONSETCH_<SECTION>__<KEY>` env names) and the v4 workstream below ship with the next release; v3.6.7 is configured with the legacy environment variables only.
-
 [![Rust](https://img.shields.io/badge/Rust-edition%202024-ce422b?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![MCP](https://img.shields.io/badge/MCP-server-7c3aed?logo=modelcontextprotocol&logoColor=white)](https://modelcontextprotocol.io)
 [![License](https://img.shields.io/badge/license-AGPL%203.0-2563eb)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-1250%2B%20passed-00d4aa)](#)
+[![Tests](https://img.shields.io/badge/tests-1270%20passed-00d4aa)](#)
 [![npm](https://img.shields.io/npm/v/donsetch?color=cb3837&logo=npm)](https://www.npmjs.com/package/donsetch)
 [![npm downloads](https://img.shields.io/npm/dm/donsetch?color=cb3837&logo=npm&label=downloads)](https://www.npmjs.com/package/donsetch)
 [![GitHub stars](https://img.shields.io/github/stars/dondai44423/donsetch?style=flat&logo=github&color=e3b341)](https://github.com/dondai44423/donsetch/stargazers)
@@ -278,8 +276,8 @@ not bundled in DonSeTch releases or Docker images.
 **Verify the install:**
 
 ```bash
-donsetch doctor          # 14 checks, ~1 second
-donsetch doctor --deep   # adds the live browser probe
+donsetch doctor          # fast local sweep, ~1 second
+donsetch doctor --deep   # adds the live browser + egress probes
 donsetch doctor --fix    # repairs mechanical problems automatically
 ```
 
@@ -288,12 +286,10 @@ MCP client and prints ready-to-paste registration blocks.
 
 ## ⚙️ Configuration
 
-> Unreleased: ships with the next release. v3.6.7 is configured with the legacy environment variables only.
-
 Every runtime knob lives in one typed config (`src/config.rs`). Four layers, later wins:
 
 1. Compiled defaults. A bare `donsetch mcp` stays the law: zero config needed.
-2. Legacy env vars (the pre-v4 names like `DONSETCH_NO_CRAWL_SHAPE`). Honored exactly as before, now reported as deprecated, cut at the v4 release.
+2. Legacy env vars (the pre-v4 names like `DONSETCH_NO_CRAWL_SHAPE`). Honored exactly as before, reported as deprecated by `doctor`. The hard cut lands in a later minor.
 3. `donsetch.toml` at `<config-dir>/donsetch/donsetch.toml` (or anywhere via `DONSETCH_CONFIG=/path/file.toml`). Unknown keys and bad values are hard errors naming the file. `DONSETCH_NO_CONFIG_FILE=1` skips the file layer entirely (setting both is an error).
 4. New env names: `DONSETCH_<SECTION>__<KEY>`, for example `DONSETCH_FETCH__PDF_MAX_MB=25`. Section upper-case, double underscore, key upper-case.
 

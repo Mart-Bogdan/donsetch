@@ -96,10 +96,7 @@ impl Fetcher {
 
     /// Attach the process-wide egress pool so fetch can stick to a
     /// host lane and rotate on rate-limit signals (v4 A2).
-    pub fn with_egress(
-        mut self,
-        pool: std::sync::Arc<crate::search::egress::EgressPool>,
-    ) -> Self {
+    pub fn with_egress(mut self, pool: std::sync::Arc<crate::search::egress::EgressPool>) -> Self {
         self.egress = Some(pool);
         self
     }

@@ -329,14 +329,22 @@ pub(crate) fn quality_host_key(host: &str) -> String {
 /// Status/doctor reader without constructing a Searcher.
 pub fn load_quality_for_status() -> QualitySnapshot {
     let map = load_quality_disk();
-    let high = map.values().filter(|q| q.samples >= QUALITY_MIN_SAMPLES && q.ewma >= 0.65).count();
-    let low = map.values().filter(|q| q.samples >= QUALITY_MIN_SAMPLES && q.ewma <= 0.35).count();
+    let high = map
+        .values()
+        .filter(|q| q.samples >= QUALITY_MIN_SAMPLES && q.ewma >= 0.65)
+        .count();
+    let low = map
+        .values()
+        .filter(|q| q.samples >= QUALITY_MIN_SAMPLES && q.ewma <= 0.35)
+        .count();
     (map.len(), high, low)
 }
 
 pub(crate) fn load_quality_disk() -> QualityMap {
     let mut map = QualityMap::new();
-    let Some(path) = quality_path() else { return map };
+    let Some(path) = quality_path() else {
+        return map;
+    };
     let Ok(raw) = std::fs::read_to_string(path) else {
         return map;
     };
@@ -368,10 +376,7 @@ pub(crate) fn save_quality_disk(map: &QualityMap) {
     }
 }
 
-pub(crate) fn save_quality_disk_if_dirty(
-    searcher: &super::Searcher,
-    map: &QualityMap,
-) {
+pub(crate) fn save_quality_disk_if_dirty(searcher: &super::Searcher, map: &QualityMap) {
     if !searcher
         .quality_dirty
         .swap(false, std::sync::atomic::Ordering::Relaxed)
@@ -471,7 +476,9 @@ pub fn load_outcome_for_status() -> (usize, usize) {
 
 pub(crate) fn load_outcome_disk() -> OutcomeMap {
     let mut map = OutcomeMap::new();
-    let Some(path) = outcome_path() else { return map };
+    let Some(path) = outcome_path() else {
+        return map;
+    };
     let Ok(raw) = std::fs::read_to_string(path) else {
         return map;
     };
@@ -564,9 +571,7 @@ pub(crate) fn apply_outcome_demote(results: &mut [Merged], outcomes: &OutcomeMap
                     && q.ewma <= 0.40
             })
             .map(|(_, q)| q.ewma)
-            .fold(None::<f32>, |acc, e| {
-                Some(acc.map_or(e, |a: f32| a.min(e)))
-            });
+            .fold(None::<f32>, |acc, e| Some(acc.map_or(e, |a: f32| a.min(e))));
         if let Some(ewma) = worst {
             let demote = ((0.5 - ewma as f64) * 2.0).clamp(0.0, 1.0);
             r.score -= OUTCOME_WEIGHT * demote;
@@ -632,7 +637,11 @@ mod tests {
             observe_quality(&mut map, "good.example", true);
         }
         let q = &map["good.example"];
-        assert!(q.ewma > 0.75, "sustained clean must stay high, got {}", q.ewma);
+        assert!(
+            q.ewma > 0.75,
+            "sustained clean must stay high, got {}",
+            q.ewma
+        );
         assert_eq!(q.samples, 6);
 
         observe_quality(&mut map, "bad.example", false);
@@ -717,7 +726,11 @@ mod tests {
             .get("keep.example")
             .expect("quality must survive restart");
         assert_eq!(q.samples, 8);
-        assert!(q.ewma > 0.7, "learned high density must load, got {}", q.ewma);
+        assert!(
+            q.ewma > 0.7,
+            "learned high density must load, got {}",
+            q.ewma
+        );
         let (n, high, _low) = load_quality_for_status();
         assert!(n >= 1);
         assert!(high >= 1);

@@ -162,10 +162,7 @@ mod tests {
     use super::*;
 
     fn isolate_cache(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "donsetch-pace-{tag}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("donsetch-pace-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // nextest process-per-test: env set before first cfg().
@@ -202,7 +199,9 @@ mod tests {
         let w = wait_and_stamp("kill.example").await;
         assert_eq!(w, Duration::ZERO);
         assert!(
-            !dir.join("host-pace").join(host_key("kill.example")).exists(),
+            !dir.join("host-pace")
+                .join(host_key("kill.example"))
+                .exists(),
             "kill switch must not write"
         );
         unsafe {

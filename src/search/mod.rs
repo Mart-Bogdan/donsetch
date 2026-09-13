@@ -728,7 +728,8 @@ impl Searcher {
             pool: self.pool.as_ref(),
             google: &self.google,
         };
-        for (engine, q, eg) in assign_egresses(self.pool.as_ref(), assignments, &mut used_egresses) {
+        for (engine, q, eg) in assign_egresses(self.pool.as_ref(), assignments, &mut used_egresses)
+        {
             futures.push(Box::pin(engine_task(engine, q, eg.id, eg.proxy, context)));
         }
         // Verticals: direct, friendly APIs.
@@ -1817,8 +1818,11 @@ mod tests {
     /// not crush the same engine's Web-intent trust (and vice versa).
     #[test]
     fn per_intent_trust_is_scoped_not_global() {
-        let dir =
-            std::env::temp_dir().join(format!("donseek-intent-trust-{}-{}", std::process::id(), line!()));
+        let dir = std::env::temp_dir().join(format!(
+            "donseek-intent-trust-{}-{}",
+            std::process::id(),
+            line!()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         unsafe { std::env::set_var("DONSETCH_CACHE_DIR", &dir) };
 

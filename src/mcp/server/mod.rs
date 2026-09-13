@@ -68,7 +68,8 @@ impl Daemon {
         // One egress fabric for search, crawl, and fetch (v4 A2).
         let egress = std::sync::Arc::new(EgressPool::from_env());
         crate::search::egress::install_global(std::sync::Arc::clone(&egress));
-        let fetcher = Arc::new(Fetcher::new(profile.clone())?.with_egress(std::sync::Arc::clone(&egress)));
+        let fetcher =
+            Arc::new(Fetcher::new(profile.clone())?.with_egress(std::sync::Arc::clone(&egress)));
         let ghost_mgr = GhostManager::new().await;
         let state = Arc::new(Mutex::new(GhostState::load()));
 
@@ -108,7 +109,8 @@ impl Daemon {
             true,
         );
 
-        let (crawler, _gov) = crawl_real::build(Arc::clone(&fetcher), std::sync::Arc::clone(&egress));
+        let (crawler, _gov) =
+            crawl_real::build(Arc::clone(&fetcher), std::sync::Arc::clone(&egress));
         let crawler = crawler.with_ghost(ghost_hook);
 
         let searcher = Arc::new(

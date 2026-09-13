@@ -115,12 +115,7 @@ impl Searcher {
         type EnrichFut<'a> = std::pin::Pin<
             Box<
                 dyn std::future::Future<
-                        Output = (
-                            usize,
-                            Option<String>,
-                            Option<String>,
-                            QualityObs,
-                        ),
+                        Output = (usize, Option<String>, Option<String>, QualityObs),
                     > + Send
                     + 'a,
             >,

@@ -17,8 +17,8 @@
 //!   fingerprint. Humans are not metronomes.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Persist learned host ladders across restarts (v4 B6). Cap + TTL

@@ -3120,17 +3120,14 @@ fn maybe_record_agent_outcome(
     }
     // Wall family (Debug format carries the vendor): routing, not
     // quality. SoftNotFound is a real content failure and falls through.
-    if verdict.starts_with("Challenge")
-        || matches!(verdict, "AuthWall" | "Paywall" | "Blocked")
-    {
+    if verdict.starts_with("Challenge") || matches!(verdict, "AuthWall" | "Paywall" | "Blocked") {
         return;
     }
     let class = crate::search::outcome_class(
         opts.must_contain.is_some(),
         opts.focus.is_some() || opts.toc || opts.section.is_some(),
     );
-    let probe_miss =
-        opts.must_contain.is_some() && ex.markdown.starts_with("probe: NO MATCH");
+    let probe_miss = opts.must_contain.is_some() && ex.markdown.starts_with("probe: NO MATCH");
     let unreadable = ex.thin || verdict == "SoftNotFound";
     if probe_miss || unreadable {
         daemon.searcher.observe_outcome_miss(class, host);

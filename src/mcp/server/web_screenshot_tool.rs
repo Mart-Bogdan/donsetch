@@ -21,7 +21,9 @@ const WAIT_MS_MAX: u64 = 5000;
 /// silently mean full-page: that is the expensive path and it made
 /// CLI/MCP disagree on the same call shape.
 fn full_page_arg(args: &Value) -> bool {
-    args.get("full_page").and_then(Value::as_bool).unwrap_or(false)
+    args.get("full_page")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub async fn web_screenshot_tool(

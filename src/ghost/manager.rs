@@ -345,9 +345,7 @@ impl GhostManager {
             if let Some(mut old) = guard.ghost.take() {
                 old.kill().await;
             }
-            guard.ghost = Some(
-                Ghost::launch_wire(profile, self.display.as_deref(), &wire).await?,
-            );
+            guard.ghost = Some(Ghost::launch_wire(profile, self.display.as_deref(), &wire).await?);
         } else {
             if crate::config::cfg().debug.ghost {
                 eprintln!("[pool] warm serve slot {}", idx);
