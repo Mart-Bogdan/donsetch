@@ -212,6 +212,29 @@ pub async fn run() {
         }
     };
     cli::print_kv("route memory", &route_line);
+
+    // v4 B5 Improve receipts: the self-improvement loop must be
+    // observable, never magic. Warm-hit + cooldown + trust health.
+    let improve_line = {
+        let state = crate::ghost::cache::GhostState::load();
+        let (hosts, walled, warm, cooldowns, flaky) = state.route_stats();
+        let warm_hits = state.pool_served_total + state.prewarmed_served_total;
+        let (_engines, _intent_keys, low_trust) = {
+            // Local search-trust snapshot without spinning a Searcher.
+            let (t, ti, f) = crate::search::persist_load_for_status();
+            let low = t.values().filter(|&&x| x < 0.5).count()
+                + ti.values().filter(|&&x| x < 0.5).count();
+            (t.len(), ti.len(), low + f.len())
+        };
+        if hosts == 0 && warm_hits == 0 && low_trust == 0 {
+            "learning (nothing recorded yet)".to_string()
+        } else {
+            format!(
+                "{warm} warm-ready · {warm_hits} warm-hits · {walled} walled · {cooldowns} cooldowns · {flaky} flaky · {low_trust} low-trust/quarantined"
+            )
+        }
+    };
+    cli::print_kv("improve", &improve_line);
     cli::print_kv(
         "deep fingerprint",
         "not probed (run `donsetch doctor --deep`)",

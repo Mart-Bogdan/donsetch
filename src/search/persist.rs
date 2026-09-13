@@ -114,6 +114,19 @@ pub(crate) fn load_cache_disk() -> CacheMap {
     map
 }
 
+/// Trust map: engine or `engine|intent_code` -> EWMA.
+pub(crate) type TrustMap = HashMap<String, f64>;
+/// Failure streak map: engine -> (consecutive fails, last Instant).
+pub(crate) type FailureMap = HashMap<String, (u32, Instant)>;
+/// Loaded health store (B2): global trust, per-intent trust, quarantines.
+pub type HealthSnapshot = (TrustMap, TrustMap, FailureMap);
+
+/// Status/doctor receipt reader: trust maps + failure streaks
+/// without constructing a Searcher (no fetcher, no pool).
+pub fn load_for_status() -> HealthSnapshot {
+    load_health_disk()
+}
+
 /// Engine health persistence: trust EWMAs + failure streaks
 /// survive restarts, so an engine benched for chronic failure
 /// skips its fan-out slot immediately after a crash instead of
@@ -122,28 +135,71 @@ fn health_path() -> Option<std::path::PathBuf> {
     Some(crate::paths::cache_dir().join("search-trust.json"))
 }
 
+/// B2: versioned trust store. v1 was engine-global only; v2 adds
+/// per-intent EWMAs. Old files migrate (anti-amnesia: every intent
+/// inherits the engine-global trust) instead of being discarded.
+const HEALTH_DISK_VERSION: u32 = 2;
+
+/// Stable key for a (engine, intent) trust sample.
+pub(crate) fn trust_intent_key(engine: &str, intent: Intent) -> String {
+    format!("{}|{}", engine, intent.code())
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct HealthDisk {
+    #[serde(default = "health_disk_version")]
+    version: u32,
+    /// Engine-global trust (legacy shape; still the fallback).
     #[serde(default)]
     trust: HashMap<String, f64>,
+    /// Per-intent trust: `engine|intent_code` -> EWMA.
+    #[serde(default)]
+    trust_intent: HashMap<String, f64>,
     #[serde(default)]
     failures: HashMap<String, (u32, u64)>,
 }
 
-pub(crate) fn load_health_disk() -> (HashMap<String, f64>, HashMap<String, (u32, Instant)>) {
+fn health_disk_version() -> u32 {
+    1
+}
+
+pub(crate) fn load_health_disk() -> HealthSnapshot {
     let mut trust = HashMap::new();
+    let mut trust_intent = HashMap::new();
     let mut failures = HashMap::new();
     let Some(path) = health_path() else {
-        return (trust, failures);
+        return (trust, trust_intent, failures);
     };
     let Ok(raw) = std::fs::read_to_string(path) else {
-        return (trust, failures);
+        return (trust, trust_intent, failures);
     };
     let Ok(h) = serde_json::from_str::<HealthDisk>(&raw) else {
-        return (trust, failures);
+        return (trust, trust_intent, failures);
     };
     for (e, t) in h.trust {
         trust.insert(e, t.clamp(0.2, 2.0));
+    }
+    // Anti-amnesia: a store that has engine-global trust but no
+    // per-intent samples (v1 files, or a fresh v2 write) seeds every
+    // intent from the engine-global EWMA so a restart never re-learns
+    // a walled engine from zero.
+    if trust_intent.is_empty() && !trust.is_empty() {
+        for (engine, t) in &trust {
+            for intent in [
+                Intent::Web,
+                Intent::Code,
+                Intent::Paper,
+                Intent::News,
+                Intent::Entity,
+            ] {
+                trust_intent
+                    .entry(trust_intent_key(engine, intent))
+                    .or_insert(*t);
+            }
+        }
+    }
+    for (k, t) in h.trust_intent {
+        trust_intent.insert(k, t.clamp(0.2, 2.0));
     }
     for (e, (n, age)) in h.failures {
         // Only a streak that WOULD still quarantine matters:
@@ -152,17 +208,20 @@ pub(crate) fn load_health_disk() -> (HashMap<String, f64>, HashMap<String, (u32,
             failures.insert(e, (n, Instant::now() - Duration::from_secs(age.min(599))));
         }
     }
-    (trust, failures)
+    (trust, trust_intent, failures)
 }
 
 pub(crate) fn save_health_disk(
     trust: &HashMap<String, f64>,
+    trust_intent: &HashMap<String, f64>,
     failures: &HashMap<String, (u32, Instant)>,
 ) {
     let Some(path) = health_path() else { return };
     let now = Instant::now();
     let disk = HealthDisk {
+        version: HEALTH_DISK_VERSION,
         trust: trust.clone(),
+        trust_intent: trust_intent.clone(),
         failures: failures
             .iter()
             .map(|(e, (n, at))| {
@@ -188,6 +247,7 @@ pub(crate) fn save_health_disk(
 pub(crate) fn save_health_disk_if_dirty(
     searcher: &super::Searcher,
     trust: &HashMap<String, f64>,
+    trust_intent: &HashMap<String, f64>,
     failures: &HashMap<String, (u32, Instant)>,
 ) {
     if !searcher
@@ -196,5 +256,5 @@ pub(crate) fn save_health_disk_if_dirty(
     {
         return;
     }
-    save_health_disk(trust, failures);
+    save_health_disk(trust, trust_intent, failures);
 }

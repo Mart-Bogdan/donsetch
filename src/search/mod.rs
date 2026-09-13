@@ -19,6 +19,8 @@ mod persist;
 mod render;
 mod tasks;
 
+pub use persist::load_for_status as persist_load_for_status;
+
 pub use render::{render_compact_markdown, render_markdown, render_meta};
 
 use enrich::PrewarmCache;
@@ -153,6 +155,10 @@ pub struct Searcher {
     /// keeps that memory across daemon restarts instead of
     /// re-paying the same failure every boot.
     trust: Mutex<HashMap<String, f64>>,
+    /// B2: per-intent trust (`engine|intent_code` -> EWMA). Roster
+    /// order prefers the intent sample; engine-global is the
+    /// fallback and still moves on every outcome.
+    trust_intent: Mutex<HashMap<String, f64>>,
     /// Set on any health-map mutation; the disk save swaps it off
     /// and skips the write entirely when nothing changed (was: a
     /// clone + serialize + write on every uncached search).
@@ -245,12 +251,13 @@ impl Searcher {
 
     /// Share one process-wide pool (daemon path).
     pub fn new_shared(fetcher: Fetcher, pool: std::sync::Arc<EgressPool>) -> Self {
-        let (trust, failures) = load_health_disk();
+        let (trust, trust_intent, failures) = load_health_disk();
         Self {
             fetcher,
             pool,
             google: engines::google_wml::ProfileSelector::from_env(),
             trust: Mutex::new(trust),
+            trust_intent: Mutex::new(trust_intent),
             health_dirty: std::sync::atomic::AtomicBool::new(false),
             cache: Mutex::new(load_cache_disk()),
             failures: Mutex::new(failures),
@@ -580,19 +587,26 @@ impl Searcher {
             .copied()
             .collect();
         // Rank engines by learned trust so width cuts drop
-        // the weakest first.
+        // the weakest first. Per-intent sample wins; engine-global
+        // is the fallback (B2).
         {
+            let key = |e: &str| persist::trust_intent_key(engine_health_key(e), intent);
             let trust = self
                 .trust
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            live.sort_by(|a, b| {
-                trust
-                    .get(engine_health_key(b))
+            let trust_i = self
+                .trust_intent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let score = |e: &str| -> f64 {
+                trust_i
+                    .get(&key(e))
+                    .or_else(|| trust.get(engine_health_key(e)))
                     .copied()
                     .unwrap_or(1.0)
-                    .total_cmp(&trust.get(engine_health_key(a)).copied().unwrap_or(1.0))
-            });
+            };
+            live.sort_by(|a, b| score(b).total_cmp(&score(a)));
         }
         // ── Adaptive fan-out width: the governor. Under
         // stress the system shrinks its appetite instead of
@@ -791,7 +805,7 @@ impl Searcher {
                         self.pool.report_ok(&engine, &egress_id);
                     }
                     if was_engine || ghost_lane {
-                        self.bump_trust(base, true);
+                        self.bump_trust(base, intent, true);
                     }
                     report.push(EngineReport {
                         engine: engine.clone(),
@@ -821,7 +835,7 @@ impl Searcher {
                         }
                     }
                     if (was_engine || ghost_lane) && is_engine_fault(&status) {
-                        self.bump_trust(base, false);
+                        self.bump_trust(base, intent, false);
                     }
                     report.push(EngineReport {
                         engine,
@@ -841,11 +855,15 @@ impl Searcher {
                     .trust
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let ti = self
+                    .trust_intent
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let f = self
                     .failures
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                save_health_disk_if_dirty(self, &t, &f);
+                save_health_disk_if_dirty(self, &t, &ti, &f);
             }
             return Err(FetchError::Http(format!(
                 "search: all engines failed : {}",
@@ -958,11 +976,15 @@ impl Searcher {
                 .trust
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let ti = self
+                .trust_intent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let f = self
                 .failures
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            save_health_disk_if_dirty(self, &t, &f);
+            save_health_disk_if_dirty(self, &t, &ti, &f);
         }
 
         Ok(SearchOutcome {
@@ -977,16 +999,46 @@ impl Searcher {
         })
     }
 
-    fn bump_trust(&self, base_engine: &str, ok: bool) {
-        let mut trust = self
+    fn bump_trust(&self, base_engine: &str, intent: Intent, ok: bool) {
+        let target = if ok { 1.2 } else { 0.3 };
+        {
+            let mut trust = self
+                .trust
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let t = trust.entry(base_engine.to_string()).or_insert(1.0);
+            *t = (*t * 0.7 + target * 0.3).clamp(0.2, 2.0);
+        }
+        {
+            let mut trust_i = self
+                .trust_intent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let key = persist::trust_intent_key(base_engine, intent);
+            let t = trust_i.entry(key).or_insert(1.0);
+            *t = (*t * 0.7 + target * 0.3).clamp(0.2, 2.0);
+        }
+        self.health_dirty
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Engine-global + per-intent trust for receipts / status.
+    pub fn trust_snapshot(&self) -> (usize, usize, usize) {
+        let trust = self
             .trust
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let t = trust.entry(base_engine.to_string()).or_insert(1.0);
-        let target = if ok { 1.2 } else { 0.3 };
-        *t = (*t * 0.7 + target * 0.3).clamp(0.2, 2.0);
-        self.health_dirty
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let trust_i = self
+            .trust_intent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let failures = self
+            .failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let low = trust.values().filter(|&&t| t < 0.5).count()
+            + trust_i.values().filter(|&&t| t < 0.5).count();
+        (trust.len(), trust_i.len(), low + failures.len())
     }
 }
 
@@ -1487,15 +1539,53 @@ mod tests {
         let mut trust = HashMap::new();
         trust.insert("brave".to_string(), 1.8);
         trust.insert("bing".to_string(), 0.42);
+        let trust_intent = HashMap::new();
         let mut failures = HashMap::new();
         failures.insert("google".to_string(), (3, Instant::now()));
-        crate::search::persist::save_health_disk(&trust, &failures);
+        crate::search::persist::save_health_disk(&trust, &trust_intent, &failures);
 
-        let (t, f) = load_health_disk();
+        let (t, ti, f) = load_health_disk();
         assert_eq!(t["brave"], 1.8, "high trust survives");
         assert_eq!(t["bing"], 0.42, "low trust survives");
         assert_eq!(f.get("google").map(|(n, _)| *n), Some(3));
+        // v1-shaped write (no trust_intent) still loads; migration
+        // seeds every intent from the engine-global EWMA.
+        assert!(
+            ti.contains_key(&super::persist::trust_intent_key("brave", Intent::Web)),
+            "v1 trust must migrate into per-intent keys"
+        );
 
+        unsafe { std::env::remove_var("DONSETCH_CACHE_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B2 discriminator: a News-intent demotion of an engine must
+    /// not crush the same engine's Web-intent trust (and vice versa).
+    #[test]
+    fn per_intent_trust_is_scoped_not_global() {
+        let dir =
+            std::env::temp_dir().join(format!("donseek-intent-trust-{}-{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("DONSETCH_CACHE_DIR", &dir) };
+
+        let fetcher = Fetcher::new(crate::profile::BrowserProfile::host_default()).unwrap();
+        let searcher = Searcher::new(fetcher, EgressPool::new(Vec::new()));
+        for _ in 0..8 {
+            searcher.bump_trust("bing", Intent::News, false);
+            searcher.bump_trust("bing", Intent::Web, true);
+        }
+        {
+            let ti = searcher
+                .trust_intent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let news = ti[&super::persist::trust_intent_key("bing", Intent::News)];
+            let web = ti[&super::persist::trust_intent_key("bing", Intent::Web)];
+            assert!(
+                news < 0.6 && web > 1.0,
+                "news demotion must stay scoped: news={news} web={web}"
+            );
+        }
         unsafe { std::env::remove_var("DONSETCH_CACHE_DIR") };
         let _ = std::fs::remove_dir_all(&dir);
     }

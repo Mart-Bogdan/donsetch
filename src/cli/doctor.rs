@@ -39,9 +39,17 @@ pub async fn run() {
     let deep = args.iter().any(|a| a == "--deep");
     let fix = args.iter().any(|a| a == "--fix");
     let only_mcp = args.iter().any(|a| a == "--mcp");
-    let stealth = args.iter().any(|a| a == "--stealth");
+    let improve = args.iter().any(|a| a == "--improve");
     let stealth_record = args.iter().any(|a| a == "--stealth-record");
+    let stealth = args.iter().any(|a| a == "--stealth") || stealth_record;
     let parity = args.iter().any(|a| a == "--parity");
+
+    // --improve: explain the self-improvement loop in ~10 lines.
+    // Standalone mode; no MCP tool, no network.
+    if improve {
+        print_improve_loop();
+        std::process::exit(0);
+    }
 
     // --stealth / --stealth-record: the drift scorecard (v4 phase
     // 0.4). Standalone mode: skips the general check battery.
@@ -418,6 +426,53 @@ fn check_proxy_pool() -> CheckResult {
         "learned benches: {burned} burned pair marker(s), {dead_n} dead lane(s)"
     ));
     CheckResult::Pass(bits.join(" · "))
+}
+
+/// `donsetch doctor --improve`: the self-improvement loop in plain
+/// language + live local receipts. No MCP tool, no network.
+fn print_improve_loop() {
+    cli::print_title(&format!("{DISPLAY_NAME} Improve"));
+    println!();
+    println!("  DonSeTch learns from YOUR use of it, on this machine only.");
+    println!("  Nothing leaves the box. No telemetry, no cloud model.");
+    println!();
+    println!("  What it remembers");
+    println!("    · per-host walls, cookie freshness, solve cooldowns");
+    println!("    · per-(engine, intent) search trust EWMAs");
+    println!("    · proxy lane health + RTT (search / fetch / crawl share it)");
+    println!("    · crawl host ladders (429 storms, robots delays)");
+    println!();
+    println!("  What it does with that");
+    println!("    · skips doomed tier-1 hits and dead egress lanes");
+    println!("    · orders engines by what worked for THIS intent");
+    println!("    · warms top results so your next web_fetch is near-instant");
+    println!("    · fails fast (honest) instead of burning a browser cycle");
+    println!();
+    let state = crate::ghost::cache::GhostState::load();
+    let (hosts, walled, warm, cooldowns, flaky) = state.route_stats();
+    let (t, ti, f) = crate::search::persist_load_for_status();
+    let low = t.values().filter(|&&x| x < 0.5).count()
+        + ti.values().filter(|&&x| x < 0.5).count();
+    let warm_hits = state.pool_served_total + state.prewarmed_served_total;
+    cli::print_kv("receipts", "");
+    println!(
+        "    hosts {hosts} · walled {walled} · warm-ready {warm} · warm-hits {warm_hits}"
+    );
+    println!(
+        "    cooldowns {cooldowns} · flaky {flaky} · probes {} · engine trust {}/{} low",
+        state.probes_total,
+        low,
+        t.len() + ti.len()
+    );
+    println!("    quarantined engines {f}", f = f.len());
+    println!();
+    println!("  Kill switches");
+    println!("    state.route_memory=off     forget host/persona learning");
+    println!("    DONSETCH_NO_EGRESS_PERSIST forget lane health");
+    println!("    DONSETCH_NO_PREWARM        stop search→fetch warm handoff");
+    println!();
+    println!("  Battle-test before any public claim: 24h soak under bench/improve/.");
+    cli::print_footer();
 }
 
 /// Egress fabric lanes (v4 A2). Fast mode: local health summary

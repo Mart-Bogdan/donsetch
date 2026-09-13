@@ -274,11 +274,15 @@ async fn route_help(cmd: &str) {
             println!("  DONSETCH_CONFIG. Skip the file layer with DONSETCH_NO_CONFIG_FILE=1.");
         }
         "doctor" => {
-            println!("Usage: donsetch doctor");
+            println!("Usage: donsetch doctor [--deep] [--fix] [--json] [--improve] [--mcp]");
             println!();
-            println!("  13 health checks: binary, network, TLS, browser, Xvfb, ghost profile,");
-            println!("  cache, permissions, PDFium, OCR models, rerank model, ghost state.");
+            println!("  Health checks: binary, network, TLS, browser, Xvfb, ghost profile,");
+            println!("  cache, permissions, PDFium, OCR models, rerank model, egress lanes.");
             println!("  Auto-fixes what it can. Reports issues with instructions.");
+            println!("  --deep     live browser launch + proxy lane probes");
+            println!("  --improve  explain the local self-improvement loop + receipts");
+            println!("  --fix      apply safe mechanical repairs");
+            println!("  --json     structured output for agents/CI");
         }
         "update" => {
             println!("Usage: donsetch update");
