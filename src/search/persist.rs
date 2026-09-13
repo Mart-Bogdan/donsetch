@@ -258,3 +258,342 @@ pub(crate) fn save_health_disk_if_dirty(
     }
     save_health_disk(trust, trust_intent, failures);
 }
+
+// ────────────────────────── B3 domain quality prior ──────────────────────────
+
+/// Learned host quality from enrich/prefetch outcomes.
+/// `ewma` is success density in 0.0..=1.0 (0.5 = neutral seed).
+/// Rank only reads hosts with enough samples so one lucky clean
+/// fetch cannot promote a junk domain.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub struct HostQuality {
+    pub ewma: f32,
+    pub samples: u32,
+    /// Unix seconds of the last observation (LRU / TTL).
+    pub last: u64,
+}
+
+impl Default for HostQuality {
+    fn default() -> Self {
+        Self {
+            ewma: 0.5,
+            samples: 0,
+            last: 0,
+        }
+    }
+}
+
+/// host (www-stripped) -> learned quality.
+pub type QualityMap = HashMap<String, HostQuality>;
+
+/// Status/doctor receipt: (tracked hosts, high-quality, low-quality).
+pub type QualitySnapshot = (usize, usize, usize);
+
+const QUALITY_DISK_VERSION: u32 = 1;
+const QUALITY_CAP: usize = 2_000;
+const QUALITY_TTL_SECS: u64 = 30 * 86_400;
+const QUALITY_MIN_SAMPLES: u32 = 3;
+/// Capped small: consensus / BM25 / static prior stay dominant.
+const QUALITY_WEIGHT: f64 = 0.08;
+
+fn quality_path() -> Option<std::path::PathBuf> {
+    Some(crate::paths::cache_dir().join("search-quality.json"))
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct QualityDisk {
+    #[serde(default = "quality_disk_version")]
+    version: u32,
+    #[serde(default)]
+    hosts: QualityMap,
+}
+
+fn quality_disk_version() -> u32 {
+    1
+}
+
+/// Strip `www.` so quality keys match `rank::host_of` + domain_prior.
+pub(crate) fn quality_host_key(host: &str) -> String {
+    host.trim_start_matches("www.")
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+/// Status/doctor reader without constructing a Searcher.
+pub fn load_quality_for_status() -> QualitySnapshot {
+    let map = load_quality_disk();
+    let high = map.values().filter(|q| q.samples >= QUALITY_MIN_SAMPLES && q.ewma >= 0.65).count();
+    let low = map.values().filter(|q| q.samples >= QUALITY_MIN_SAMPLES && q.ewma <= 0.35).count();
+    (map.len(), high, low)
+}
+
+pub(crate) fn load_quality_disk() -> QualityMap {
+    let mut map = QualityMap::new();
+    let Some(path) = quality_path() else { return map };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return map;
+    };
+    let Ok(d) = serde_json::from_str::<QualityDisk>(&raw) else {
+        return map;
+    };
+    let now = now_unix();
+    for (host, q) in d.hosts {
+        if now.saturating_sub(q.last) > QUALITY_TTL_SECS {
+            continue;
+        }
+        map.insert(host, q);
+    }
+    map
+}
+
+pub(crate) fn save_quality_disk(map: &QualityMap) {
+    let Some(path) = quality_path() else { return };
+    let disk = QualityDisk {
+        version: QUALITY_DISK_VERSION,
+        hosts: map.clone(),
+    };
+    let Ok(json) = serde_json::to_string(&disk) else {
+        return;
+    };
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(tmp, path);
+    }
+}
+
+pub(crate) fn save_quality_disk_if_dirty(
+    searcher: &super::Searcher,
+    map: &QualityMap,
+) {
+    if !searcher
+        .quality_dirty
+        .swap(false, std::sync::atomic::Ordering::Relaxed)
+    {
+        return;
+    }
+    save_quality_disk(map);
+}
+
+/// One enrich/prefetch observation. Clean content raises density;
+/// dead/soft-404 lowers it. Walls/timeouts never call this (routing
+/// fact, not a quality fact).
+pub(crate) fn observe_quality(map: &mut QualityMap, host: &str, ok: bool) {
+    let key = quality_host_key(host);
+    let target = if ok { 0.9 } else { 0.1 };
+    let entry = map.entry(key).or_default();
+    entry.ewma = entry.ewma * 0.7 + (target as f32) * 0.3;
+    entry.samples = entry.samples.saturating_add(1);
+    entry.last = now_unix();
+    // Bound: evict coldest LRU beyond cap.
+    if map.len() > QUALITY_CAP {
+        let Some(coldest) = map
+            .iter()
+            .min_by_key(|(_, q)| q.last)
+            .map(|(k, _)| k.clone())
+        else {
+            return;
+        };
+        map.remove(&coldest);
+    }
+}
+
+/// B3 rank nudge. Applied with static domain_prior, before the
+/// vertical-only penalty so CE can still rescue semantically-
+/// relevant results. Kill switch: `search.quality_prior=false`.
+pub(crate) fn apply_quality_prior(results: &mut [Merged], quality: &QualityMap) {
+    if !crate::config::cfg().search.quality_prior {
+        return;
+    }
+    for r in results.iter_mut() {
+        let host = super::rank::host_of(&r.url);
+        let key = quality_host_key(&host);
+        let Some(q) = quality.get(&key) else {
+            continue;
+        };
+        if q.samples < QUALITY_MIN_SAMPLES {
+            continue;
+        }
+        let learned = ((q.ewma as f64 - 0.5) * 2.0).clamp(-1.0, 1.0);
+        r.score += QUALITY_WEIGHT * learned;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn isolate_cache(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "donsetch-quality-b3-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe {
+            std::env::set_var("DONSETCH_CACHE_DIR", &dir);
+        }
+        dir
+    }
+
+    fn clean_isolate(dir: std::path::PathBuf) {
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe {
+            std::env::remove_var("DONSETCH_CACHE_DIR");
+        }
+    }
+
+    fn merged(url: &str, score: f64) -> Merged {
+        Merged {
+            title: "t".into(),
+            url: url.into(),
+            snippet: "s".into(),
+            sources: vec![("brave".into(), 1)],
+            score,
+            published: None,
+        }
+    }
+
+    fn quality_for(ewma: f32, samples: u32) -> HostQuality {
+        HostQuality {
+            ewma,
+            samples,
+            last: now_unix(),
+        }
+    }
+
+    #[test]
+    fn observe_quality_moves_ewma_toward_target() {
+        let mut map = QualityMap::new();
+        observe_quality(&mut map, "www.good.example", true);
+        let q = &map["good.example"];
+        assert!(q.ewma > 0.5, "clean must raise density, got {}", q.ewma);
+        assert_eq!(q.samples, 1);
+        // A few more cleans should push well above the apply gate.
+        for _ in 0..5 {
+            observe_quality(&mut map, "good.example", true);
+        }
+        let q = &map["good.example"];
+        assert!(q.ewma > 0.75, "sustained clean must stay high, got {}", q.ewma);
+        assert_eq!(q.samples, 6);
+
+        observe_quality(&mut map, "bad.example", false);
+        let b = &map["bad.example"];
+        assert!(b.ewma < 0.5, "dead must lower density, got {}", b.ewma);
+    }
+
+    #[test]
+    fn quality_prior_nudges_only_after_min_samples() {
+        let dir = isolate_cache("nudge");
+        // Config is process-global; defaults have quality_prior=true.
+        let mut map = QualityMap::new();
+        map.insert("hot.example".into(), quality_for(0.95, 3));
+        map.insert("cold.example".into(), quality_for(0.05, 3));
+        map.insert("young.example".into(), quality_for(0.99, 1));
+
+        let mut results = vec![
+            merged("https://hot.example/a", 1.0),
+            merged("https://cold.example/b", 1.0),
+            merged("https://young.example/c", 1.0),
+            merged("https://unknown.example/d", 1.0),
+        ];
+        apply_quality_prior(&mut results, &map);
+        assert!(
+            results[0].score > 1.0,
+            "proven-good host must gain, got {}",
+            results[0].score
+        );
+        assert!(
+            results[1].score < 1.0,
+            "proven-dead host must lose, got {}",
+            results[1].score
+        );
+        assert!(
+            (results[2].score - 1.0).abs() < 1e-9,
+            "single-sample host must stay neutral, got {}",
+            results[2].score
+        );
+        assert!(
+            (results[3].score - 1.0).abs() < 1e-9,
+            "unknown host must stay neutral, got {}",
+            results[3].score
+        );
+        clean_isolate(dir);
+    }
+
+    #[test]
+    fn quality_prior_kill_switch_skips_nudge() {
+        let dir = isolate_cache("kill");
+        unsafe {
+            std::env::set_var("DONSETCH_NO_CONFIG_FILE", "1");
+            std::env::set_var("DONSETCH_NO_QUALITY_PRIOR", "1");
+        }
+        // Force a fresh config load under the kill switch.
+        // cfg() is frozen at first use; nextest = process-per-test
+        // so this test's first cfg() sees the env.
+        let mut map = QualityMap::new();
+        map.insert("hot.example".into(), quality_for(0.95, 10));
+        let mut results = vec![merged("https://hot.example/a", 1.0)];
+        apply_quality_prior(&mut results, &map);
+        assert!(
+            (results[0].score - 1.0).abs() < 1e-9,
+            "kill switch must leave scores untouched, got {}",
+            results[0].score
+        );
+        unsafe {
+            std::env::remove_var("DONSETCH_NO_QUALITY_PRIOR");
+        }
+        clean_isolate(dir);
+    }
+
+    #[test]
+    fn quality_survives_restart() {
+        let dir = isolate_cache("persist");
+        let mut map = QualityMap::new();
+        for _ in 0..8 {
+            observe_quality(&mut map, "keep.example", true);
+        }
+        save_quality_disk(&map);
+        let reloaded = load_quality_disk();
+        let q = reloaded
+            .get("keep.example")
+            .expect("quality must survive restart");
+        assert_eq!(q.samples, 8);
+        assert!(q.ewma > 0.7, "learned high density must load, got {}", q.ewma);
+        let (n, high, _low) = load_quality_for_status();
+        assert!(n >= 1);
+        assert!(high >= 1);
+        clean_isolate(dir);
+    }
+
+    #[test]
+    fn quality_cap_evicts_coldest_host() {
+        let mut map = QualityMap::new();
+        // Fill to cap with an old host, then one more observe forces LRU out.
+        for i in 0..QUALITY_CAP {
+            let key = format!("h{i}.example");
+            map.insert(
+                key,
+                HostQuality {
+                    ewma: 0.5,
+                    samples: 1,
+                    last: i as u64,
+                },
+            );
+        }
+        assert_eq!(map.len(), QUALITY_CAP);
+        observe_quality(&mut map, "new.example", true);
+        assert_eq!(map.len(), QUALITY_CAP, "cap must hold");
+        assert!(map.contains_key("new.example"));
+        assert!(!map.contains_key("h0.example"), "coldest LRU must evict");
+    }
+}

@@ -132,6 +132,8 @@ section!(SearchSection {
     rerank_topup: bool = true,
     rerank_threads: u32 = 0,
     brightdata_zone: String = String::new(),
+    /// B3: learned host quality from enrich/prefetch success density.
+    quality_prior: bool = true,
 });
 
 section!(BrowserSection {
@@ -1156,6 +1158,14 @@ fn legacy_layer() -> (VMap, Vec<String>) {
             "DONSETCH_NO_FETCH_ROTATE",
         );
     }
+    if legacy_flag("DONSETCH_NO_QUALITY_PRIOR") {
+        put(
+            &mut m,
+            "search.quality_prior",
+            false.into(),
+            "DONSETCH_NO_QUALITY_PRIOR",
+        );
+    }
 
     // debug
     if std::env::var_os("DONGHOST_DEBUG").is_some() {
@@ -1598,6 +1608,13 @@ pub(crate) fn fieldbook() -> &'static Fieldbook {
             FieldKind::Str,
             "(unset)",
             "BYOK Bright Data search zone",
+        ),
+        (
+            "search",
+            "quality_prior",
+            FieldKind::Bool,
+            "true",
+            "learned host quality from enrich success; small rank nudge",
         ),
         // browser
         (
@@ -2310,6 +2327,7 @@ pub(crate) fn legacy_target_of(name: &str) -> (&'static str, &'static str) {
         "DONSEEK_NO_TOPUP" => ("search", "rerank_topup"),
         "DONSEEK_RERANK_THREADS" => ("search", "rerank_threads"),
         "DONSETCH_BRIGHTDATA_ZONE" => ("search", "brightdata_zone"),
+        "DONSETCH_NO_QUALITY_PRIOR" => ("search", "quality_prior"),
         "DONSETCH_BROWSER_BACKEND" | "DONGHOST_BROWSER_BACKEND" => ("browser", "backend"),
         "DONGHOST_CHROME" => ("browser", "chromium_path"),
         "DONGHOST_NO_SANDBOX" => ("browser", "no_sandbox"),
@@ -3210,6 +3228,28 @@ mod tests {
         assert_eq!(
             legacy_target_of("DONSETCH_NO_FETCH_ROTATE"),
             ("proxy", "fetch_rotate")
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn quality_prior_defaults_on_and_honors_kill_switch() {
+        let guard = clean_env();
+        set_env("DONSETCH_NO_CONFIG_FILE", "1");
+        let loaded = load().expect("defaults");
+        assert!(
+            loaded.config.search.quality_prior,
+            "search.quality_prior must default true"
+        );
+        set_env("DONSETCH_NO_QUALITY_PRIOR", "1");
+        let loaded = load().expect("kill switch");
+        assert!(
+            !loaded.config.search.quality_prior,
+            "DONSETCH_NO_QUALITY_PRIOR must map to search.quality_prior=false"
+        );
+        assert_eq!(
+            legacy_target_of("DONSETCH_NO_QUALITY_PRIOR"),
+            ("search", "quality_prior")
         );
         drop(guard);
     }

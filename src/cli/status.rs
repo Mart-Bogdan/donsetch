@@ -226,11 +226,12 @@ pub async fn run() {
                 + ti.values().filter(|&&x| x < 0.5).count();
             (t.len(), ti.len(), low + f.len())
         };
-        if hosts == 0 && warm_hits == 0 && low_trust == 0 {
+        let (q_hosts, q_high, q_low) = crate::search::persist_load_quality_for_status();
+        if hosts == 0 && warm_hits == 0 && low_trust == 0 && q_hosts == 0 {
             "learning (nothing recorded yet)".to_string()
         } else {
             format!(
-                "{warm} warm-ready · {warm_hits} warm-hits · {walled} walled · {cooldowns} cooldowns · {flaky} flaky · {low_trust} low-trust/quarantined"
+                "{warm} warm-ready · {warm_hits} warm-hits · {walled} walled · {cooldowns} cooldowns · {flaky} flaky · {low_trust} low-trust/quarantined · quality {q_high}+/{q_low}-/{q_hosts}"
             )
         }
     };

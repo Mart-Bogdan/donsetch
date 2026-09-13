@@ -56,12 +56,15 @@ channel until the v4.0.0 release train.
   clearance vault is refused when the live lane is the other class
   (home-IP cookies never ride a proxy exit). Crawl host ladders
   (429 storms, robots delays) persist to `crawl-governor.json`
-  (cap ~2k hosts, 7d TTL). `donsetch status` has an **improve** line
-  (warm-hits, walled, cooldowns, flaky, low-trust/quarantined) and
-  `donsetch doctor --improve` explains the loop in ~10 lines with live
-  local receipts and kill switches. No MCP tool, no telemetry, no
-  cross-machine sharing. A 24h soak battery still gates any public
-  improve claim.
+  (cap ~2k hosts, 7d TTL). Enrich/prefetch success density feeds a
+  capped domain quality prior (`search-quality.json`, ±0.08 after
+  ≥3 samples; kill `DONSETCH_NO_QUALITY_PRIOR`; walls and timeouts
+  never count). `donsetch status` has an **improve** line
+  (warm-hits, walled, cooldowns, flaky, low-trust/quarantined,
+  quality hosts) and `donsetch doctor --improve` explains the loop
+  in ~10 lines with live local receipts and kill switches. No MCP
+  tool, no telemetry, no cross-machine sharing. A 24h soak battery
+  still gates any public improve claim.
 - `just win-check`: type-checks the crate for `x86_64-pc-windows-gnu`
   from Linux (clippy, no linkage), both `--no-default-features` and
   the full feature set, so `#[cfg(windows)]` breakage from a

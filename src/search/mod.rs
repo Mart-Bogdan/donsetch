@@ -20,11 +20,15 @@ mod render;
 mod tasks;
 
 pub use persist::load_for_status as persist_load_for_status;
+pub use persist::load_quality_for_status as persist_load_quality_for_status;
 
 pub use render::{render_compact_markdown, render_markdown, render_meta};
 
 use enrich::PrewarmCache;
-use persist::{load_cache_disk, load_health_disk, save_cache_disk, save_health_disk_if_dirty};
+use persist::{
+    QualityMap, load_cache_disk, load_health_disk, load_quality_disk, save_cache_disk,
+    save_health_disk_if_dirty, save_quality_disk_if_dirty,
+};
 use tasks::{EngineResult, TaskFut, engine_task, ghost_engine_task, vertical_task};
 
 use std::collections::HashMap;
@@ -194,6 +198,11 @@ pub struct Searcher {
     /// headless Chrome: live-proven). Used ONLY by the
     /// thinness-gated cascade lane; None in test builds.
     ghost: Option<crate::crawl::GhostHook>,
+    /// B3: learned host quality (www-stripped host -> EWMA).
+    /// Filled by enrich/prefetch outcomes; nudges ranking
+    /// slightly after enough samples. Kill: search.quality_prior.
+    quality: Mutex<QualityMap>,
+    quality_dirty: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "rerank")]
@@ -265,6 +274,8 @@ impl Searcher {
             byok_inflight: Mutex::new(std::collections::HashSet::new()),
             prewarms: std::sync::Arc::new(std::sync::Mutex::new(PrewarmCache::new())),
             ghost: None,
+            quality: Mutex::new(load_quality_disk()),
+            quality_dirty: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -902,6 +913,17 @@ impl Searcher {
         };
         #[cfg(not(feature = "rerank"))]
         let mut results = rank::merge(&per_engine, query, intent, &trust, 12);
+        // B3: learned host quality nudge. After merge (and its
+        // diversity cap) so it only reorders survivors with a
+        // small weight; consensus still dominates.
+        {
+            let quality = self
+                .quality
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            persist::apply_quality_prior(&mut results, &quality);
+        }
+        results.sort_by(|a, b| b.score.total_cmp(&a.score));
         let weak = rank::is_weak(&results, total);
 
         // ── Result enrichment: prefetch top results to extract
@@ -1039,6 +1061,33 @@ impl Searcher {
         let low = trust.values().filter(|&&t| t < 0.5).count()
             + trust_i.values().filter(|&&t| t < 0.5).count();
         (trust.len(), trust_i.len(), low + failures.len())
+    }
+
+    /// B3: record one enrich/prefetch outcome for a host.
+    /// Clean content raises density; dead/soft-404 lowers it.
+    /// No-op when the quality prior is killed.
+    pub(crate) fn observe_quality(&self, host: &str, ok: bool) {
+        if !crate::config::cfg().search.quality_prior {
+            return;
+        }
+        {
+            let mut quality = self
+                .quality
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            persist::observe_quality(&mut quality, host, ok);
+        }
+        self.quality_dirty
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Persist quality map if it changed since the last save.
+    pub(crate) fn save_quality_if_dirty(&self) {
+        let quality = self
+            .quality
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        save_quality_disk_if_dirty(self, &quality);
     }
 }
 

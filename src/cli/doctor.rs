@@ -439,12 +439,14 @@ fn print_improve_loop() {
     println!("  What it remembers");
     println!("    · per-host walls, cookie freshness, solve cooldowns");
     println!("    · per-(engine, intent) search trust EWMAs");
+    println!("    · domain quality from enrich success (tiny rank prior)");
     println!("    · proxy lane health + RTT (search / fetch / crawl share it)");
     println!("    · crawl host ladders (429 storms, robots delays)");
     println!();
     println!("  What it does with that");
     println!("    · skips doomed tier-1 hits and dead egress lanes");
     println!("    · orders engines by what worked for THIS intent");
+    println!("    · nudges ranking toward hosts that historically enrich clean");
     println!("    · warms top results so your next web_fetch is near-instant");
     println!("    · fails fast (honest) instead of burning a browser cycle");
     println!();
@@ -454,6 +456,7 @@ fn print_improve_loop() {
     let low = t.values().filter(|&&x| x < 0.5).count()
         + ti.values().filter(|&&x| x < 0.5).count();
     let warm_hits = state.pool_served_total + state.prewarmed_served_total;
+    let (q_hosts, q_high, q_low) = crate::search::persist_load_quality_for_status();
     cli::print_kv("receipts", "");
     println!(
         "    hosts {hosts} · walled {walled} · warm-ready {warm} · warm-hits {warm_hits}"
@@ -464,12 +467,13 @@ fn print_improve_loop() {
         low,
         t.len() + ti.len()
     );
-    println!("    quarantined engines {f}", f = f.len());
+    println!("    quarantined engines {f} · quality hosts {q_hosts} ({q_high} high / {q_low} low)", f = f.len());
     println!();
     println!("  Kill switches");
     println!("    state.route_memory=off     forget host/persona learning");
     println!("    DONSETCH_NO_EGRESS_PERSIST forget lane health");
     println!("    DONSETCH_NO_PREWARM        stop search→fetch warm handoff");
+    println!("    DONSETCH_NO_QUALITY_PRIOR  stop the learned domain rank nudge");
     println!();
     println!("  Battle-test before any public claim: 24h soak under bench/improve/.");
     cli::print_footer();
