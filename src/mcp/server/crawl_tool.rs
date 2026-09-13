@@ -353,6 +353,10 @@ pub(super) fn render_crawl_dataset(
     let mut structured = json!({
         "seed": result.seed,
         "dataset": true,
+        // Schema marker (v4 F). Row shape: url/title/kind/markdown/
+        // chars/fetched_at/lastmod/parent. Bump on any row-field change
+        // so downstream parsers can fail closed.
+        "dataset_version": 1,
         "rows": rows.len(),
         "complete": matches!(result.stop, crate::crawl::StopReason::FrontierEmpty),
         "stop": format!("{:?}", result.stop),
@@ -571,6 +575,7 @@ mod crawl_output_contract_tests {
         assert_eq!(row0["fetched_at"], 1_770_000_000u64);
         assert_eq!(out["structuredContent"]["rows"], 2);
         assert_eq!(out["structuredContent"]["dataset"], true);
+        assert_eq!(out["structuredContent"]["dataset_version"], 1);
         assert_eq!(out["structuredContent"]["complete"], true);
         // Skipped pages surface in debug, never as rows.
         assert_eq!(

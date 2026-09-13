@@ -88,6 +88,7 @@ section!(ProxySection {
 section!(TlsSection {
     cert_file: String = String::new(),
     cert_dir: String = String::new(),
+    mldsa_sigalgs: bool = true,
 });
 
 section!(PersonaSection {
@@ -112,6 +113,7 @@ section!(FetchSection {
     pdf_max_mb: usize = 100,
     ocr: bool = true,
     ocr_max_pages: u32 = 25,
+    resume_ttl_secs: u64 = 7200,
 });
 
 section!(BypassSection {
@@ -1211,6 +1213,14 @@ fn legacy_layer() -> (VMap, Vec<String>) {
             "DONSETCH_NO_SERP_INSTANT",
         );
     }
+    if legacy_flag("DONSETCH_NO_MLDSA_SIGALGS") {
+        put(
+            &mut m,
+            "tls.mldsa_sigalgs",
+            false.into(),
+            "DONSETCH_NO_MLDSA_SIGALGS",
+        );
+    }
 
     // debug
     if std::env::var_os("DONGHOST_DEBUG").is_some() {
@@ -1446,6 +1456,13 @@ pub(crate) fn fieldbook() -> &'static Fieldbook {
             "(ambient)",
             "extra CA cert directory (additive on top of the ambient set)",
         ),
+        (
+            "tls",
+            "mldsa_sigalgs",
+            FieldKind::Bool,
+            "true",
+            "advertise ML-DSA 44/65/87 in ClientHello signature_algorithms (Chrome 151 parity)",
+        ),
         // persona
         (
             "persona",
@@ -1553,6 +1570,13 @@ pub(crate) fn fieldbook() -> &'static Fieldbook {
             FieldKind::Int,
             "25",
             "max OCR pages per PDF (1..=500)",
+        ),
+        (
+            "fetch",
+            "resume_ttl_secs",
+            FieldKind::Int,
+            "7200",
+            "crawl resume-token TTL seconds (clamped 300..86400)",
         ),
         // bypass
         (
@@ -1925,6 +1949,12 @@ const LEGACY_VARS: &[&str] = &[
     "DONSHEET_DEBUG_WORDS",
     "DONSIFT_DEBUG",
     "DONSETCH_DEBUG_ECHO",
+    "DONSETCH_NO_SEARCH_EARLY",
+    "DONSETCH_NO_QUERY_COMPILE",
+    "DONSETCH_NO_SERP_INSTANT",
+    "DONSETCH_NO_QUALITY_PRIOR",
+    "DONSETCH_OUTCOME_FEEDBACK",
+    "DONSETCH_NO_MLDSA_SIGALGS",
 ];
 
 /// Every legacy knob still set in the environment (for doctor + show).
@@ -2405,6 +2435,7 @@ pub(crate) fn legacy_target_of(name: &str) -> (&'static str, &'static str) {
         "DONSETCH_NO_SEARCH_EARLY" => ("search", "search_early"),
         "DONSETCH_NO_QUERY_COMPILE" => ("search", "query_compile"),
         "DONSETCH_NO_SERP_INSTANT" => ("search", "serp_instant"),
+        "DONSETCH_NO_MLDSA_SIGALGS" => ("tls", "mldsa_sigalgs"),
         "DONSETCH_BROWSER_BACKEND" | "DONGHOST_BROWSER_BACKEND" => ("browser", "backend"),
         "DONGHOST_CHROME" => ("browser", "chromium_path"),
         "DONGHOST_NO_SANDBOX" => ("browser", "no_sandbox"),
@@ -3415,6 +3446,28 @@ mod tests {
         assert_eq!(
             legacy_target_of("DONSETCH_NO_SERP_INSTANT"),
             ("search", "serp_instant")
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn mldsa_sigalgs_defaults_on_and_honors_kill_switch() {
+        let guard = clean_env();
+        set_env("DONSETCH_NO_CONFIG_FILE", "1");
+        let loaded = load().expect("defaults");
+        assert!(
+            loaded.config.tls.mldsa_sigalgs,
+            "tls.mldsa_sigalgs must default true (Chrome 151 parity)"
+        );
+        set_env("DONSETCH_NO_MLDSA_SIGALGS", "1");
+        let loaded = load().expect("kill switch");
+        assert!(
+            !loaded.config.tls.mldsa_sigalgs,
+            "DONSETCH_NO_MLDSA_SIGALGS must map to tls.mldsa_sigalgs=false"
+        );
+        assert_eq!(
+            legacy_target_of("DONSETCH_NO_MLDSA_SIGALGS"),
+            ("tls", "mldsa_sigalgs")
         );
         drop(guard);
     }

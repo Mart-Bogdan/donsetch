@@ -110,19 +110,17 @@ impl BrowserProfile {
                              ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:\
                              AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA:AES256-SHA",
                 groups: "X25519MLKEM768:X25519:P-256:P-384",
-                // NOTE (v4 parity finding, 2026-09-08): the floor's
-                // real Chromium 151 also pads sig-algs with three
-                // GREASE codes (0x0904/05/06) at the front. boring's
-                // public set_sigalgs_list validates against known
-                // algorithms and refuses them ([INVALID_SIGNATURE_
-                // ALGORITHM], live-proven), and upstream boringssl
-                // has NO sig-alg grease hook (its grease indexes:
-                // cipher/group/ext1/ext2/version/ticket/ech). Raw
-                // ClientHello extension injection would be needed:
-                // documented as the L1 evergreen work item in
-                // design/v4.md, doctor --stealth --parity surfaces
-                // the exact delta meanwhile.
-                sigalgs: "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:\
+                // Chrome 151 ClientHello pads signature_algorithms with
+                // ML-DSA 44/65/87 (IANA 0x0904/05/06) at the front. Those
+                // codes used to be rejected by boring's set_sigalgs_list
+                // (INVALID_SIGNATURE_ALGORITHM); boring/boring-sys 5.2.0
+                // names them mldsa44/65/87 and ships the ML-DSA verify
+                // crypto, so the ChromeTrue wire finally matches. Kill
+                // switch: tls.mldsa_sigalgs=false / DONSETCH_NO_MLDSA_
+                // SIGALGS strips them (InterceptionSafe never sends them:
+                // a corporate MITM re-terminates without ML-DSA certs).
+                sigalgs: "mldsa44:mldsa65:mldsa87:\
+                          ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:\
                           ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:\
                           rsa_pss_rsae_sha512:rsa_pkcs1_sha512",
                 alpn: b"\x02h2\x08http/1.1",
@@ -317,6 +315,31 @@ pub fn accept_language_for(host: &str, path: &str) -> &'static str {
         return "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7";
     }
     "en-US,en;q=0.9"
+}
+
+/// Persona-coherent Accept-Language (v4 E2). Real Chrome sends the
+/// user's configured languages, not a TLD guess. The persona locale
+/// is primary; a different TLD/script signal is kept as a lower-q
+/// preference so localized content still lands, without the classic
+/// "en-US browser speaking perfect ru-RU" JA4H tell.
+pub fn accept_language_with_persona(host: &str, path: &str, persona_locale: &str) -> String {
+    let base = accept_language_for(host, path);
+    let plang = persona_locale.split('-').next().unwrap_or("").to_ascii_lowercase();
+    if plang.len() < 2 || plang.len() > 3 || !plang.chars().all(|c| c.is_ascii_alphabetic()) {
+        return base.to_string();
+    }
+    // Persona already matches the TLD default: ship that exact string.
+    let primary = persona_locale.split('-').next().unwrap_or("");
+    if base.starts_with(primary) || base.starts_with(&persona_locale.to_ascii_lowercase()) {
+        return format!("{persona_locale},{plang};q=0.9,en-US;q=0.8,en;q=0.7");
+    }
+    // Persona en-US on a .ru page: en first, TLD second.
+    let tld = accept_language_for(host, path);
+    let tld_primary = tld.split(',').next().unwrap_or(tld);
+    if tld_primary.is_empty() {
+        return format!("{persona_locale},{plang};q=0.9");
+    }
+    format!("{persona_locale},{plang};q=0.9,{tld_primary};q=0.8")
 }
 
 /// Probe the installed browser's major version. Cached after first call.
@@ -613,6 +636,24 @@ mod locale_tests {
             accept_language_for("example.com", "/docs"),
             "en-US,en;q=0.9"
         );
+    }
+
+    #[test]
+    fn persona_locale_is_primary_accept_language() {
+        use super::accept_language_with_persona;
+        // en-US persona on a .com page: same as the TLD default.
+        let al = accept_language_with_persona("example.com", "/docs", "en-US");
+        assert!(al.starts_with("en-US,en;q=0.9"), "{al}");
+        // en-US persona on a .ru page: persona first, TLD second.
+        let al = accept_language_with_persona("example.com.ru", "/", "en-US");
+        assert!(al.starts_with("en-US,en;q=0.9,"), "{al}");
+        assert!(al.contains("ru-RU"), "TLD signal kept: {al}");
+        // de-DE persona on a .de page: persona-shaped, not the raw TLD string.
+        let al = accept_language_with_persona("example.de", "/", "de-DE");
+        assert!(al.starts_with("de-DE,de;q=0.9"), "{al}");
+        // Invalid persona locale falls back to the TLD default.
+        let al = accept_language_with_persona("example.ru", "/", "nope");
+        assert!(al.starts_with("ru-RU"), "{al}");
     }
 }
 

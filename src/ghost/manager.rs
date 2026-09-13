@@ -278,6 +278,19 @@ impl GhostManager {
         profile: &BrowserProfile,
         host: Option<&str>,
     ) -> Result<GhostGuard, FetchError> {
+        self.acquire_for_wire(profile, host, crate::ghost::GhostWire::default())
+            .await
+    }
+
+    /// Host-affinity acquire with a persona-coherent wire identity
+    /// (viewport + locale). Used by web_fetch / screenshot so the
+    /// ghost agrees with tier-1 Accept-Language and the persona pin.
+    pub async fn acquire_for_wire(
+        &self,
+        profile: &BrowserProfile,
+        host: Option<&str>,
+        wire: crate::ghost::GhostWire,
+    ) -> Result<GhostGuard, FetchError> {
         let key = persona_key(profile);
         let idx = {
             let mut snaps = self.meta.lock().unwrap_or_else(|p| p.into_inner());
@@ -309,7 +322,9 @@ impl GhostManager {
             if let Some(mut old) = guard.ghost.take() {
                 old.kill().await;
             }
-            guard.ghost = Some(Ghost::launch(profile, self.display.as_deref()).await?);
+            guard.ghost = Some(
+                Ghost::launch_wire(profile, self.display.as_deref(), &wire).await?,
+            );
         } else {
             if crate::config::cfg().debug.ghost {
                 eprintln!("[pool] warm serve slot {}", idx);

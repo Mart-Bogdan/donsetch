@@ -101,6 +101,53 @@ pub struct Ghost {
     /// Aborted in Drop, same as fetch_guard.
     #[cfg(windows)]
     winlock_heartbeat: Option<tokio::task::JoinHandle<()>>,
+    /// Persona-coherent wire identity (v4 E2): viewport + locale used
+    /// for launch args, CDP languages, and device metrics.
+    wire: GhostWire,
+}
+
+/// Per-persona ghost wire identity (v4 E2). Defaults are the old
+/// hardcoded 1920x1080 / en-US so callers that have no persona stay
+/// byte-identical.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GhostWire {
+    pub viewport: (u32, u32),
+    pub locale: String,
+}
+
+impl Default for GhostWire {
+    fn default() -> Self {
+        Self {
+            viewport: (1920, 1080),
+            locale: "en-US".into(),
+        }
+    }
+}
+
+impl GhostWire {
+    pub fn from_persona(p: &crate::persona::Persona) -> Self {
+        let (w, h) = p.viewport;
+        // Coherence checker already bounds the viewport; clamp here so a
+        // corrupt on-disk persona can never pass a nonsense --window-size.
+        let w = w.clamp(800, 4000);
+        let h = h.clamp(600, 3000);
+        let locale = if p.locale.is_empty() {
+            "en-US".to_string()
+        } else {
+            p.locale.clone()
+        };
+        Self {
+            viewport: (w, h),
+            locale,
+        }
+    }
+
+    /// Chrome --lang wants a BCP-47-ish tag; navigator.languages
+    /// wants the full list. Keep both derived from one locale.
+    pub fn languages_js(&self) -> String {
+        let lang = self.locale.split('-').next().unwrap_or("en");
+        format!("['{}', '{}']", self.locale, lang)
+    }
 }
 
 /// Persistent profile dir: aged state passes challenges
@@ -117,13 +164,23 @@ pub fn default_chrome_args(
     dir: &std::path::Path,
     profile: &crate::profile::BrowserProfile,
 ) -> Vec<String> {
+    default_chrome_args_wire(dir, profile, &GhostWire::default())
+}
+
+/// Launch args with a persona-coherent viewport and locale (v4 E2).
+pub fn default_chrome_args_wire(
+    dir: &std::path::Path,
+    profile: &crate::profile::BrowserProfile,
+    wire: &GhostWire,
+) -> Vec<String> {
+    let (vw, vh) = wire.viewport;
     vec![
         "--remote-debugging-port=0".into(),
         format!("--user-data-dir={}", dir.display()),
         format!("--user-agent={}", profile.user_agent),
-        "--window-size=1920,1080".into(),
+        format!("--window-size={vw},{vh}"),
         "--window-position=-32000,-32000".into(),
-        "--lang=en-US".into(),
+        format!("--lang={}", wire.locale),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         "--disable-background-networking".into(),
@@ -476,6 +533,15 @@ impl Ghost {
         profile: &BrowserProfile,
         display: Option<&str>,
     ) -> Result<Self, FetchError> {
+        Self::launch_wire(profile, display, &GhostWire::default()).await
+    }
+
+    /// Launch with a persona-coherent viewport/locale (v4 E2).
+    pub async fn launch_wire(
+        profile: &BrowserProfile,
+        display: Option<&str>,
+        wire: &GhostWire,
+    ) -> Result<Self, FetchError> {
         // Unused on macOS/Windows (Xvfb is Linux-only) : clippy -Dwarnings errors on it.
         #[cfg(not(linux_like))]
         let _ = display;
@@ -631,7 +697,7 @@ impl Ghost {
             }
         }
         let mut cmd = Command::new(bin);
-        let mut chrome_args: Vec<String> = default_chrome_args(&dir, profile);
+        let mut chrome_args: Vec<String> = default_chrome_args_wire(&dir, profile, wire);
         let force_headless = browser.backend == cloak::BrowserBackend::HeadlessChromium;
         if browser.backend == cloak::BrowserBackend::CloakBrowser {
             // Cloak's C++ patches own the extension/plugin and
@@ -846,19 +912,20 @@ impl Ghost {
         // the property undefined); --disable-blink-features=
         // AutomationControlled on the launch args handles the
         // headless-mode case without defining anything.
+        let langs_js = wire.languages_js();
         let _ = cdp
             .call(
                 Some(&session),
                 "Page.addScriptToEvaluateOnNewDocument",
                 json!({
-                    "source": "\
-                        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });\
-                        if (!window.chrome) { window.chrome = {}; }\
-                        if (!window.chrome.runtime) { window.chrome.runtime = {}; }\
-                        if (navigator.plugins && navigator.plugins.length === 0) {\
-                            Object.defineProperty(navigator, 'plugins', { get: () => [{ name: 'Chrome PDF Plugin' }, { name: 'Chrome PDF Viewer' }, { name: 'Native Client' }] });\
-                        }\
-                    "
+                    "source": format!("\
+                        Object.defineProperty(navigator, 'languages', {{ get: () => {langs_js} }});\
+                        if (!window.chrome) {{ window.chrome = {{}}; }}\
+                        if (!window.chrome.runtime) {{ window.chrome.runtime = {{}}; }}\
+                        if (navigator.plugins && navigator.plugins.length === 0) {{\
+                            Object.defineProperty(navigator, 'plugins', {{ get: () => [{{ name: 'Chrome PDF Plugin' }}, {{ name: 'Chrome PDF Viewer' }}, {{ name: 'Native Client' }}] }});\
+                        }}\
+                    ")
                 }),
             )
             .await;
@@ -890,21 +957,27 @@ impl Ghost {
 
         // Unknown platform fallback: headless mode with device
         // metrics override (no real screen geometry available).
-        #[cfg(not(any(linux_like, target_os = "macos", target_os = "windows")))]
+        // Also applied when the persona pins a non-default viewport
+        // so window-size and the layout viewport cannot disagree.
         {
-            cdp.call(
-                Some(&session),
-                "Emulation.setDeviceMetricsOverride",
-                json!({
-                    "width": 1920,
-                    "height": 1080,
-                    "deviceScaleFactor": 1,
-                    "mobile": false,
-                    "screenWidth": 1920,
-                    "screenHeight": 1080
-                }),
-            )
-            .await?;
+            let (vw, vh) = wire.viewport;
+            let needs_metrics = cfg!(not(any(linux_like, target_os = "macos", target_os = "windows")))
+                || wire.viewport != (1920, 1080);
+            if needs_metrics {
+                cdp.call(
+                    Some(&session),
+                    "Emulation.setDeviceMetricsOverride",
+                    json!({
+                        "width": vw,
+                        "height": vh,
+                        "deviceScaleFactor": 1,
+                        "mobile": false,
+                        "screenWidth": vw,
+                        "screenHeight": vh
+                    }),
+                )
+                .await?;
+            }
         }
 
         // Session warmup : Debian 12 chromium 151 (observed): the
@@ -948,12 +1021,18 @@ impl Ghost {
             winlock,
             #[cfg(windows)]
             winlock_heartbeat,
+            wire: wire.clone(),
         })
     }
 
     #[allow(dead_code)] // useful accessor for debugging/agent surface
     pub fn pid(&self) -> Option<u32> {
         self.child.id()
+    }
+
+    /// The wire identity this browser was launched with (v4 E2).
+    pub fn wire(&self) -> &GhostWire {
+        &self.wire
     }
 
     /// Freeze the whole process tree. CPU → 0, RAM goes

@@ -252,9 +252,9 @@ struct ResumeState {
 /// save stale copies over each other, so a token issued
 /// milliseconds ago reads back as "resume token expired or
 /// unknown". Token files are written exactly once; consumption
-/// deletes the file. Sweep = 120-minute mtime + a 50-token cap;
-/// the legacy single-file store migrates on first touch.
-const RESUME_TTL_SECS: u64 = 120 * 60;
+/// deletes the file. Sweep = mtime TTL (`fetch.resume_ttl_secs`,
+/// default 120 min) + a 50-token cap; the legacy single-file store
+/// migrates on first touch.
 const RESUME_CAP: usize = 50;
 
 fn resumes_dir() -> std::path::PathBuf {
@@ -334,7 +334,12 @@ fn write_token_file(dir: &std::path::Path, tok: &str, state: &ResumeState) -> bo
 
 /// Drop expired tokens and cap the store at 50, oldest first.
 /// Per-file mtime is the age signal: nothing else writes these.
+/// TTL is `fetch.resume_ttl_secs` (default 2h, clamped 5m..24h).
 fn resume_store_sweep(dir: &std::path::Path) {
+    let ttl = crate::config::cfg()
+        .fetch
+        .resume_ttl_secs
+        .clamp(300, 86_400);
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -352,7 +357,7 @@ fn resume_store_sweep(dir: &std::path::Path) {
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|t| now.saturating_sub(t.as_secs()) < RESUME_TTL_SECS)
+            .map(|t| now.saturating_sub(t.as_secs()) < ttl)
             .unwrap_or(false);
         if age_ok {
             alive.push((

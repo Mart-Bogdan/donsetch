@@ -46,6 +46,8 @@ pub struct FetchOutcome {
 struct RequestIdentity<'a> {
     class: RequestClass,
     legacy_user_agent: Option<&'a str>,
+    /// Persona-coherent Accept-Language (v4 E2). None = TLD/script default.
+    accept_language: Option<&'a str>,
 }
 
 pub struct Fetcher {
@@ -521,6 +523,7 @@ impl Fetcher {
             RequestIdentity {
                 class,
                 legacy_user_agent: None,
+                accept_language: None,
             },
         )
         .await
@@ -550,6 +553,29 @@ impl Fetcher {
             RequestIdentity {
                 class: RequestClass::Navigation,
                 legacy_user_agent: Some(user_agent),
+                accept_language: None,
+            },
+        )
+        .await
+    }
+
+    /// Navigation fetch whose Accept-Language is persona-coherent
+    /// (v4 E2). The rest of the header set stays profile-true.
+    pub async fn fetch_persona(
+        &self,
+        url_str: &str,
+        accept_language: Option<&str>,
+    ) -> Result<FetchOutcome, FetchError> {
+        self.fetch_once_via_identity(
+            url_str,
+            &[],
+            None,
+            true,
+            None,
+            RequestIdentity {
+                class: RequestClass::Navigation,
+                legacy_user_agent: None,
+                accept_language,
             },
         )
         .await
@@ -567,6 +593,7 @@ impl Fetcher {
         let RequestIdentity {
             class,
             legacy_user_agent: user_agent,
+            accept_language,
         } = identity;
         // Centralized gate ensures credentials/host checks even for
         // direct fetch_once calls (e.g. tests, internal callers).
@@ -603,6 +630,15 @@ impl Fetcher {
 
         // Header set from profile (Chrome order, coherence) + cookie + conditionals.
         let mut req_headers = self.profile.h1_headers_for_class(&authority, &path, class);
+        if let Some(al) = accept_language
+            && !al.is_empty()
+        {
+            for (n, v) in &mut req_headers {
+                if n == "accept-language" {
+                    *v = al.to_owned();
+                }
+            }
+        }
         if let Some(ua) = user_agent {
             // These browser metadata headers do not describe a legacy client.
             req_headers.retain(|(n, _)| {

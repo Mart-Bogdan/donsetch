@@ -102,6 +102,25 @@ channel until the v4.0.0 release train.
   (`ghost-state.json`, `routes.json`, `byok-keys.json`) and
   auto-tighten to 0600. All new checks carry unit tests; live
   `doctor` on a real box is green with honest warnings.
+- **ML-DSA ClientHello parity (v4 E1):** Chrome 151 pads
+  `signature_algorithms` with ML-DSA 44/65/87 (IANA 0x0904/05/06).
+  boring 5.2.0 finally names and verifies those codes, so the
+  ChromeTrue wire advertises them (`mldsa44:mldsa65:mldsa87:` at
+  the front). InterceptionSafe never sends them (a corporate MITM
+  re-terminates without ML-DSA certs). Kill:
+  `tls.mldsa_sigalgs=false` / `DONSETCH_NO_MLDSA_SIGALGS`.
+- **Persona wire divergence (v4 E2):** per-domain personas now
+  actually drive the wire. Tier-1 Accept-Language is persona-locale
+  first (TLD/script kept as a lower-q preference so localized
+  content still lands, without the classic en-US browser speaking
+  perfect ru-RU JA4H tell). The ghost browser launches with the
+  persona's viewport and `--lang`, and CDP `navigator.languages`
+  matches. Quarantined personas fall back to the default wire.
+- **Crawl polish (v4 F, partial):** dataset JSONL rows carry
+  `dataset_version: 1` in structuredContent; resume-token TTL is
+  `fetch.resume_ttl_secs` (default 7200, clamped 300..86400) instead
+  of a hardcoded 2h. Canonical/binary skip and transient-vs-permanent
+  retry were already on master; reconfirmed with tests.
 - `just win-check`: type-checks the crate for `x86_64-pc-windows-gnu`
   from Linux (clippy, no linkage), both `--no-default-features` and
   the full feature set, so `#[cfg(windows)]` breakage from a

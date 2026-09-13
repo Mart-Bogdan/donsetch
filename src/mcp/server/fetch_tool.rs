@@ -731,6 +731,25 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
         // (no burned / foreign-persona reuse).
         state.ensure_persona_egress(&host);
     }
+    // v4 E2: persona locale drives Accept-Language so tier-1 and
+    // the ghost claim one language identity. Viewport/locale for the
+    // browser itself are looked up again at acquire time.
+    let persona_al = {
+        let state = daemon.state.lock().await;
+        match state.personas.get(&host) {
+            Some(p) if p.quarantine_reason.is_none() => {
+                Some(crate::profile::accept_language_with_persona(
+                    &host,
+                    url::Url::parse(&url)
+                        .map(|u| u.path().to_string())
+                        .unwrap_or_else(|_| "/".into())
+                        .as_str(),
+                    &p.locale,
+                ))
+            }
+            _ => None,
+        }
+    };
     let route = if tier == "2" && !is_pdf_url && !adapter_host {
         RouteDecision::SkipToSolve
     } else if tier == "1" || is_pdf_url || adapter_host {
@@ -832,7 +851,11 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
 
     if !skip_tier1 && !prewarmed {
         let t0 = std::time::Instant::now();
-        let fetched = match daemon.fetcher.fetch(&url).await {
+        let fetched = match daemon
+            .fetcher
+            .fetch_persona(&url, persona_al.as_deref())
+            .await
+        {
             Ok(o) => o,
             Err(e) => {
                 if adapter_host && !no_adapter {
@@ -1535,9 +1558,19 @@ pub(super) async fn ghost_escalate(
     trace: &mut Trace,
 ) -> Result<(extract::Extracted, &'static str, u16, String), (String, &'static str)> {
     let t0 = std::time::Instant::now();
+    // v4 E2: ghost agrees with the persona pin (viewport + locale).
+    let wire = {
+        let state = daemon.state.lock().await;
+        state
+            .personas
+            .get(host)
+            .filter(|p| p.quarantine_reason.is_none())
+            .map(|p| p.ghost_wire())
+            .unwrap_or_default()
+    };
     let mut g = daemon
         .ghost_mgr
-        .acquire_for(&daemon.profile, Some(host))
+        .acquire_for_wire(&daemon.profile, Some(host), wire)
         .await
         .map_err(|e| (format!("browser launch failed: {e}"), "permanent"))?;
     trace.step("2", "browser-launch", "ok", t0.elapsed().as_millis());
@@ -1963,9 +1996,18 @@ pub(super) async fn fetch_with_actions(
     trace.step("route", "actions", "browser-script", 0);
 
     let t0 = std::time::Instant::now();
+    let wire = {
+        let state = daemon.state.lock().await;
+        state
+            .personas
+            .get(host)
+            .filter(|p| p.quarantine_reason.is_none())
+            .map(|p| p.ghost_wire())
+            .unwrap_or_default()
+    };
     let mut g = match daemon
         .ghost_mgr
-        .acquire_for(&daemon.profile, Some(host))
+        .acquire_for_wire(&daemon.profile, Some(host), wire)
         .await
     {
         Ok(g) => g,
@@ -2310,9 +2352,18 @@ pub(super) async fn anticloak_check(
     tier1_markdown: &str,
 ) -> Option<(f64, String)> {
     let host = crate::search::rank::host_of(url);
+    let wire = {
+        let state = daemon.state.lock().await;
+        state
+            .personas
+            .get(host.as_str())
+            .filter(|p| p.quarantine_reason.is_none())
+            .map(|p| p.ghost_wire())
+            .unwrap_or_default()
+    };
     let mut g = daemon
         .ghost_mgr
-        .acquire_for(&daemon.profile, Some(host.as_str()))
+        .acquire_for_wire(&daemon.profile, Some(host.as_str()), wire)
         .await
         .ok()?;
     let page = ops::ghost_fetch(&mut g, url, std::time::Duration::from_secs(20))
