@@ -8,7 +8,9 @@ pub mod byok;
 pub mod coverage;
 pub mod egress;
 pub mod engines;
+pub mod instant;
 pub mod intent;
+pub mod query;
 pub mod rank;
 pub mod rerank;
 pub mod verticals;
@@ -173,7 +175,7 @@ fn early_consensus_enough(outcomes: &[(String, EngineResult)]) -> bool {
     let mut url_families: HashMap<String, HashSet<&str>> = HashMap::new();
     let mut families_ok: HashSet<&str> = HashSet::new();
     for (label, result) in outcomes {
-        let Ok((hits, _, _, _)) = result else {
+        let Ok((hits, _, _, _, _)) = result else {
             continue;
         };
         let fam = rank::engine_family(engine_name(label));
@@ -293,6 +295,9 @@ pub struct SearchOutcome {
     pub provider: Option<String>,
     /// Cross-encoder reranking applied (feature on + model loaded).
     pub reranked: bool,
+    /// C5: byte-derived featured snippet / instant / knowledge.
+    /// Never merged into `results`. None when absent.
+    pub instant: Option<instant::InstantAnswer>,
 }
 
 impl Searcher {
@@ -371,6 +376,8 @@ impl Searcher {
             .cloned()
             .collect();
         site_filter(query, &mut results);
+        query::intitle_filter(query, &mut results);
+        query::filetype_filter(query, &mut results);
         Some(SearchOutcome {
             results,
             // BYOK results are provider-ranked and never flagged weak,
@@ -382,6 +389,9 @@ impl Searcher {
             elapsed: t0.elapsed(),
             provider,
             reranked: false,
+            // BYOK providers do not surface a byte-derived SERP
+            // instant layer; keep the slot honest.
+            instant: None,
         })
     }
 
@@ -566,6 +576,8 @@ impl Searcher {
                     let weak = rank::is_weak(&cached, total);
                     let mut results = cached.iter().take(max_results).cloned().collect();
                     site_filter(query, &mut results);
+                    query::intitle_filter(query, &mut results);
+                    query::filetype_filter(query, &mut results);
                     return Ok(SearchOutcome {
                         results,
                         weak,
@@ -575,6 +587,9 @@ impl Searcher {
                         elapsed: started.elapsed(),
                         provider: None,
                         reranked: crate::search::rerank::loaded(),
+                        // Instant is not cached: a stale featured
+                        // snippet presented as fresh would lie.
+                        instant: None,
                     });
                 }
             }
@@ -611,6 +626,8 @@ impl Searcher {
             let weak = rank::is_weak(cached, *total);
             let mut results = cached.iter().take(max_results).cloned().collect();
             site_filter(query, &mut results);
+            query::intitle_filter(query, &mut results);
+            query::filetype_filter(query, &mut results);
             return Ok(SearchOutcome {
                 results,
                 weak,
@@ -620,11 +637,27 @@ impl Searcher {
                 elapsed: started.elapsed(),
                 provider: None,
                 reranked: crate::search::rerank::loaded(),
+                // Instant is not cached: a stale featured
+                // snippet presented as fresh would lie.
+                instant: None,
             });
         }
 
         let engines = intent::engines_for(intent);
-        let verticals = intent::verticals_for(intent, query);
+        // C2: compile operators once; each engine gets the form it
+        // actually honors (DDG lite strips site: so BM25 is not
+        // polluted with the literal token).
+        let compiled = query::compile(query);
+        let mut verticals = intent::verticals_for(intent, query);
+        // site:github.com / site:stackoverflow.com / etc. join the
+        // fan-out as the site's own API.
+        if let Some(site) = &compiled.site
+            && let Some(sv) = query::site_vertical(site)
+            && !verticals.contains(&sv)
+        {
+            verticals.push(sv);
+        }
+        let verticals = intent::trim_verticals_for_stress(verticals, self.pool.stress());
 
         // Fan out: engines each get their own egress
         // (spreading is the anti-rate-limit move).
@@ -671,7 +704,7 @@ impl Searcher {
         live.truncate(width);
         let mut assignments: Vec<(String, String)> = live
             .iter()
-            .map(|e| (e.to_string(), query.to_string()))
+            .map(|e| (e.to_string(), query::for_engine(&compiled, e)))
             .collect();
         // Recall variants spend lanes : only when the
         // governor did NOT cut the roster (healthy pool).
@@ -699,7 +732,10 @@ impl Searcher {
             futures.push(Box::pin(engine_task(engine, q, eg.id, eg.proxy, context)));
         }
         // Verticals: direct, friendly APIs.
-        let verticals: Vec<&&str> = verticals.iter().filter(|v| !self.quarantined(v)).collect();
+        let verticals: Vec<&str> = verticals
+            .into_iter()
+            .filter(|v| !self.quarantined(v))
+            .collect();
         for v in verticals {
             futures.push(Box::pin(vertical_task(
                 v.to_string(),
@@ -740,7 +776,7 @@ impl Searcher {
         let ok_hits: usize = outcomes
             .iter()
             .filter_map(|(_, r)| r.as_ref().ok())
-            .map(|(h, _, _, _)| h.len())
+            .map(|(h, _, _, _, _)| h.len())
             .sum();
         let merge_thin = ok_engines < 3 || ok_hits < 15;
         let failed: Vec<String> = if merge_thin {
@@ -833,7 +869,7 @@ impl Searcher {
             + retry_outcomes
                 .iter()
                 .filter_map(|(_, r)| r.as_ref().ok())
-                .map(|(h, _, _, _)| h.len())
+                .map(|(h, _, _, _, _)| h.len())
                 .sum::<usize>();
         let force_lane = crate::config::cfg().search.ghost_lane == crate::config::GhostLane::Always;
         let google_http_ok = outcomes
@@ -861,6 +897,9 @@ impl Searcher {
 
         let mut per_engine: Vec<(String, Vec<engines::Hit>)> = Vec::new();
         let mut report = Vec::new();
+        // C5: best instant answer across lanes (first non-empty wins
+        // by engine trust order, which outcomes already respect).
+        let mut instant: Option<instant::InstantAnswer> = None;
         let all: Vec<(String, EngineResult)> = outcomes
             .into_iter()
             .chain(retry_outcomes)
@@ -871,7 +910,7 @@ impl Searcher {
             let engine = engine_name(&label).to_string();
             let ghost_lane = engine == "google_ghost";
             match outcome {
-                Ok((hits, ms, egress_id, was_engine)) => {
+                Ok((hits, ms, egress_id, was_engine, lane_instant)) => {
                     let base = engine_health_key(&engine);
                     self.record_outcome(base, true);
                     if was_engine && !ghost_lane {
@@ -882,6 +921,11 @@ impl Searcher {
                     }
                     if was_engine || ghost_lane {
                         self.bump_trust(base, intent, true);
+                    }
+                    if instant.is_none()
+                        && let Some(ans) = lane_instant
+                    {
+                        instant = Some(ans);
                     }
                     report.push(EngineReport {
                         engine: engine.clone(),
@@ -1007,11 +1051,13 @@ impl Searcher {
         // and description, not the SERP's truncated version.
         self.enrich_results(&mut results).await;
 
-        // ── site: operator enforcement: engines don't strictly
-        // respect `site:domain.com` : some results leak through
-        // from other domains. Filter them out post-merge so the
-        // agent only gets results from the requested domain.
+        // ── site:/intitle:/filetype: post-merge enforcement:
+        // engines don't strictly respect operators : some results
+        // leak through. Filter them out post-merge so the agent
+        // only sees what it asked for.
         site_filter(query, &mut results);
+        query::intitle_filter(query, &mut results);
+        query::filetype_filter(query, &mut results);
 
         // Post-enrichment top-up: the cross-encoder now sees the
         // real page titles/descriptions on the top slice, not the
@@ -1092,6 +1138,7 @@ impl Searcher {
             elapsed: started.elapsed(),
             provider: None,
             reranked: crate::search::rerank::loaded(),
+            instant,
         })
     }
 
@@ -1410,6 +1457,7 @@ mod tests {
             elapsed: Duration::ZERO,
             provider: Some(provider.to_string()),
             reranked: false,
+            instant: None,
         }
     }
 
@@ -1661,6 +1709,7 @@ mod tests {
                     10u64,
                     "direct".to_string(),
                     true,
+                    None,
                 )),
             )
         };
@@ -2008,6 +2057,7 @@ mod tests {
             elapsed: Duration::from_millis(10),
             provider: None,
             reranked: false,
+            instant: None,
         }
     }
 

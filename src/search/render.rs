@@ -115,6 +115,26 @@ pub fn render_markdown(
     // Snippets carry just enough to decide : content is
     // the fetch tool's job.
     let mut md = format!("# Search: {query}\n\n");
+    // C5: instant answers sit ABOVE the organic list, never inside
+    // it. Source URL always present; text is byte-derived.
+    if let Some(ans) = &out.instant {
+        let kind = match ans.kind {
+            "knowledge" => "Knowledge",
+            "answer" => "Instant answer",
+            _ => "Featured snippet",
+        };
+        let title = if ans.title.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", ans.title)
+        };
+        md.push_str(&format!(
+            "## {kind} ({}){title}\n{}\n{}\n\n",
+            ans.engine,
+            clip_snippet(&ans.text, 400),
+            ans.url
+        ));
+    }
     for (i, r) in out.results.iter().enumerate() {
         let host = rank::host_of(&r.url);
         md.push_str(&format!("{}. **{}** : {}\n", i + 1, r.title, host));
@@ -223,6 +243,20 @@ pub fn render_compact_markdown(
         markdown.push_str(heading);
         markdown.push('\n');
     }
+    if let Some(ans) = &out.instant {
+        // Compact surface: one line. Full text lives in structuredContent.
+        let label = match ans.kind {
+            "knowledge" => "knowledge",
+            "answer" => "instant",
+            _ => "featured",
+        };
+        markdown.push_str(&format!(
+            "Instant ({label} via {}): {} · {}\n",
+            ans.engine,
+            clip_snippet(&ans.text, 160),
+            ans.url
+        ));
+    }
 
     for (index, result) in out.results.iter().enumerate() {
         let reference = handles
@@ -289,6 +323,15 @@ fn egress_label(raw: &str) -> String {
 }
 
 pub fn render_meta(out: &SearchOutcome) -> Value {
+    let instant = out.instant.as_ref().map(|ans| {
+        json!({
+            "kind": ans.kind,
+            "title": ans.title,
+            "text": ans.text,
+            "url": ans.url,
+            "engine": ans.engine,
+        })
+    });
     json!({
         "intent": format!("{:?}", out.intent),
         "weak": out.weak,
@@ -296,6 +339,7 @@ pub fn render_meta(out: &SearchOutcome) -> Value {
         "elapsed_ms": out.elapsed.as_millis() as u64,
         "provider": out.provider,
         "rerank": if out.reranked { "on" } else { "off (RRF+BM25 fallback)" },
+        "instant": instant,
         "results": out.results.iter().map(|r| {
             // Named sources (deduped: an engine surfacing a URL at
             // two ranks is one opinion for the list, exactly like

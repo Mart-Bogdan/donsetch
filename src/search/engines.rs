@@ -120,7 +120,7 @@ fn base64url_decode(s: &str) -> Option<String> {
 /// These should never appear as search results : they leak
 /// through parsers when redirect decoding fails or when
 /// broad selectors match pagination/header links.
-fn is_serp_url(url: &str) -> bool {
+pub(crate) fn is_serp_url(url: &str) -> bool {
     let lower = url.to_lowercase();
     let serp_patterns = [
         // General SERPs

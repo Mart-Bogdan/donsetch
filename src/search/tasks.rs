@@ -13,8 +13,23 @@ use crate::detect::walls::Verdict;
 use crate::error::FetchError;
 use crate::fetch::client::Fetcher;
 
-pub(super) type EngineResult =
-    Result<(Vec<engines::Hit>, u64, String, bool), (String, String, bool)>;
+/// Engine fan-out outcome.
+///
+/// Ok: (hits, latency_ms, egress_id, was_engine, instant).
+/// `was_engine` is true for web engines (pool bookkeeping applies)
+/// and false for verticals. `instant` is a byte-derived SERP
+/// answer, if any; it is never merged into the organic hit list.
+/// Err: (status, egress_id, was_engine).
+pub(super) type EngineResult = Result<
+    (
+        Vec<engines::Hit>,
+        u64,
+        String,
+        bool,
+        Option<super::instant::InstantAnswer>,
+    ),
+    (String, String, bool),
+>;
 
 pub(super) type TaskFut<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = (String, EngineResult)> + Send + 'a>>;
@@ -147,6 +162,7 @@ pub(super) async fn engine_task_with_budget(
         );
     }
     let hits = engines::parse(&engine, &html);
+    let instant = super::instant::parse_instant(&engine, &html);
     if hits.len() < 3 {
         // Honest "no results" is NOT an engine failure :
         // don't burn trust/lanes for a dry query.
@@ -161,7 +177,7 @@ pub(super) async fn engine_task_with_budget(
     if let Some(lease) = &lease {
         google.finish(lease, "ok");
     }
-    (label, Ok((hits, ms, egress_id, true)))
+    (label, Ok((hits, ms, egress_id, true, instant)))
 }
 
 /// The browser-render SERP lane. Runs the SERP URL through the
@@ -196,6 +212,7 @@ pub(super) async fn ghost_engine_task(
         Ok(Ok(r)) => r.html,
     };
     let hits = engines::parse("google_ghost", &rendered);
+    let instant = super::instant::parse_instant("google_ghost", &rendered);
     let ms = started.elapsed().as_millis() as u64;
     if hits.len() < 3 {
         // 200-but-no-results 2026 Google = bot wall or an AI-mode
@@ -205,7 +222,7 @@ pub(super) async fn ghost_engine_task(
             Err(("blocked:captcha".into(), "ghost".into(), true)),
         );
     }
-    (engine, Ok((hits, ms, "ghost".into(), true)))
+    (engine, Ok((hits, ms, "ghost".into(), true, instant)))
 }
 
 pub(super) async fn vertical_task(
@@ -239,7 +256,7 @@ fn vertical_success(vertical: String, hits: Vec<engines::Hit>, ms: u64) -> (Stri
     if hits.is_empty() {
         return (vertical, Err(("no-results".into(), "direct".into(), false)));
     }
-    (vertical, Ok((hits, ms, "direct".into(), false)))
+    (vertical, Ok((hits, ms, "direct".into(), false, None)))
 }
 
 #[cfg(test)]
@@ -298,7 +315,7 @@ mod tests {
                 context,
             )
             .await;
-            let (hits, ms, egress, was_engine) =
+            let (hits, ms, egress, was_engine, _instant) =
                 outcome.expect("Google HTTP lane must return usable results");
             assert!(engine.starts_with("google@"));
             assert_eq!(egress, "direct");
@@ -355,10 +372,11 @@ mod tests {
     fn vertical_with_hits_is_success() {
         let (name, result) = vertical_success("github".into(), vec![hit("A", "https://a.com")], 42);
         assert_eq!(name, "github");
-        let (hits, ms, egress, was_engine) = result.expect("hits => success");
+        let (hits, ms, egress, was_engine, instant) = result.expect("hits => success");
         assert_eq!(hits.len(), 1);
         assert_eq!(ms, 42);
         assert_eq!(egress, "direct");
         assert!(!was_engine);
+        assert!(instant.is_none());
     }
 }

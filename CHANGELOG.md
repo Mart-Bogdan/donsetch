@@ -69,12 +69,26 @@ channel until the v4.0.0 release train.
   explains the loop in ~10 lines with live local receipts and kill
   switches. No MCP tool, no telemetry, no cross-machine sharing.
   A 24h soak battery still gates any public improve claim.
-- **Search v3 (partial):** adaptive early-return cancels stragglers
-  once ≥3 independent index families already agree on a top-3 URL
-  (kill `DONSETCH_NO_SEARCH_EARLY`). Mojeek `empty-parse` (blocked
-  as HTTP 200) burns engine trust harder so it leaves the default
-  width instead of occupying a slot every query. Compact snippets
-  trim to 180 chars.
+- **Search v3:** adaptive early-return cancels stragglers once ≥3
+  independent index families already agree on a top-3 URL (kill
+  `DONSETCH_NO_SEARCH_EARLY`). Mojeek `empty-parse` (blocked as HTTP
+  200) burns engine trust harder so it leaves the default width
+  instead of occupying a slot every query. Compact snippets trim to
+  180 chars. Query compiler splits `site:` / `filetype:` / `intitle:`
+  out of the free text and only sends each operator to engines that
+  honor it (DDG lite strips them so BM25 never ranks the literal
+  token); post-merge filters enforce `site:` and `intitle:`, and
+  `filetype:` keeps matching URLs plus extensionless download
+  handlers (kill `DONSETCH_NO_QUERY_COMPILE`). `site:github.com`,
+  `site:stackoverflow.com`, and friends also join the fan-out as
+  that site's own API. A byte-derived SERP instant layer lifts
+  featured snippets / instant answers / knowledge panels out of the
+  organic list into their own slot with the source URL always
+  present (never invents text; not cached; kill
+  `DONSETCH_NO_SERP_INSTANT`). Code verticals are query-gated and
+  stress-aware: StackExchange only on Q&A/error language, MDN only
+  on web-platform tokens, HN only on release/announce; under pool
+  stress HN drops first.
 - `just win-check`: type-checks the crate for `x86_64-pc-windows-gnu`
   from Linux (clippy, no linkage), both `--no-default-features` and
   the full feature set, so `#[cfg(windows)]` breakage from a

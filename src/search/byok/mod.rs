@@ -286,6 +286,9 @@ impl ByokSearcher {
                         provider: Some(provider),
                         // Provider-ranked, not cross-encoder-ranked.
                         reranked: false,
+                        // Providers do not expose a byte-derived
+                        // SERP instant layer.
+                        instant: None,
                     });
                 }
                 Err(key_error) => {

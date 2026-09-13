@@ -216,7 +216,21 @@ pub(super) fn search_model_meta(out: &crate::search::SearchOutcome, handles: &[S
             item
         })
         .collect::<Vec<_>>();
-    json!({"weak": out.weak, "results": results})
+    let mut item = json!({
+        "weak": out.weak,
+        "results": results,
+    });
+    // Instant answers are decision aids, not ranked evidence: they
+    // ride structuredContent (not the organic list) with their source.
+    if let Some(ans) = &out.instant {
+        item["instant"] = json!({
+            "kind": ans.kind,
+            "text": ans.text,
+            "url": ans.url,
+            "engine": ans.engine,
+        });
+    }
+    item
 }
 
 pub(super) fn search_debug_meta(out: &crate::search::SearchOutcome) -> Value {
@@ -649,6 +663,7 @@ mod search_output_contract_tests {
             elapsed: Duration::from_millis(10),
             provider: None,
             reranked: true,
+            instant: None,
         };
         let state = search_model_meta(&output, &["S1".into()]);
         assert_eq!(state["results"][0]["rank"], 1);

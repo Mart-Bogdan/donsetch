@@ -141,6 +141,12 @@ section!(SearchSection {
     /// C4: cancel stragglers once ≥3 independent families agree
     /// on a top-3 URL. Kill: DONSETCH_NO_SEARCH_EARLY.
     search_early: bool = true,
+    /// C2: compile site:/filetype:/intitle: per-engine (strip from
+    /// engines that ignore them). Kill: DONSETCH_NO_QUERY_COMPILE.
+    query_compile: bool = true,
+    /// C5: extract byte-derived featured/instant/knowledge answers
+    /// from SERP HTML. Kill: DONSETCH_NO_SERP_INSTANT.
+    serp_instant: bool = true,
 });
 
 section!(BrowserSection {
@@ -1189,6 +1195,22 @@ fn legacy_layer() -> (VMap, Vec<String>) {
             "DONSETCH_NO_SEARCH_EARLY",
         );
     }
+    if legacy_flag("DONSETCH_NO_QUERY_COMPILE") {
+        put(
+            &mut m,
+            "search.query_compile",
+            false.into(),
+            "DONSETCH_NO_QUERY_COMPILE",
+        );
+    }
+    if legacy_flag("DONSETCH_NO_SERP_INSTANT") {
+        put(
+            &mut m,
+            "search.serp_instant",
+            false.into(),
+            "DONSETCH_NO_SERP_INSTANT",
+        );
+    }
 
     // debug
     if std::env::var_os("DONGHOST_DEBUG").is_some() {
@@ -1652,6 +1674,20 @@ pub(crate) fn fieldbook() -> &'static Fieldbook {
             FieldKind::Bool,
             "true",
             "cancel stragglers when ≥3 index families already agree on a top-3 URL",
+        ),
+        (
+            "search",
+            "query_compile",
+            FieldKind::Bool,
+            "true",
+            "compile site:/filetype:/intitle: per-engine; strip from engines that ignore them",
+        ),
+        (
+            "search",
+            "serp_instant",
+            FieldKind::Bool,
+            "true",
+            "extract byte-derived featured/instant/knowledge answers from SERP HTML",
         ),
         // browser
         (
@@ -2367,6 +2403,8 @@ pub(crate) fn legacy_target_of(name: &str) -> (&'static str, &'static str) {
         "DONSETCH_NO_QUALITY_PRIOR" => ("search", "quality_prior"),
         "DONSETCH_OUTCOME_FEEDBACK" => ("search", "outcome_feedback"),
         "DONSETCH_NO_SEARCH_EARLY" => ("search", "search_early"),
+        "DONSETCH_NO_QUERY_COMPILE" => ("search", "query_compile"),
+        "DONSETCH_NO_SERP_INSTANT" => ("search", "serp_instant"),
         "DONSETCH_BROWSER_BACKEND" | "DONGHOST_BROWSER_BACKEND" => ("browser", "backend"),
         "DONGHOST_CHROME" => ("browser", "chromium_path"),
         "DONGHOST_NO_SANDBOX" => ("browser", "no_sandbox"),
@@ -3333,6 +3371,50 @@ mod tests {
         assert_eq!(
             legacy_target_of("DONSETCH_NO_SEARCH_EARLY"),
             ("search", "search_early")
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn query_compile_defaults_on_and_honors_kill_switch() {
+        let guard = clean_env();
+        set_env("DONSETCH_NO_CONFIG_FILE", "1");
+        let loaded = load().expect("defaults");
+        assert!(
+            loaded.config.search.query_compile,
+            "search.query_compile must default true"
+        );
+        set_env("DONSETCH_NO_QUERY_COMPILE", "1");
+        let loaded = load().expect("kill switch");
+        assert!(
+            !loaded.config.search.query_compile,
+            "DONSETCH_NO_QUERY_COMPILE must map to search.query_compile=false"
+        );
+        assert_eq!(
+            legacy_target_of("DONSETCH_NO_QUERY_COMPILE"),
+            ("search", "query_compile")
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn serp_instant_defaults_on_and_honors_kill_switch() {
+        let guard = clean_env();
+        set_env("DONSETCH_NO_CONFIG_FILE", "1");
+        let loaded = load().expect("defaults");
+        assert!(
+            loaded.config.search.serp_instant,
+            "search.serp_instant must default true"
+        );
+        set_env("DONSETCH_NO_SERP_INSTANT", "1");
+        let loaded = load().expect("kill switch");
+        assert!(
+            !loaded.config.search.serp_instant,
+            "DONSETCH_NO_SERP_INSTANT must map to search.serp_instant=false"
+        );
+        assert_eq!(
+            legacy_target_of("DONSETCH_NO_SERP_INSTANT"),
+            ("search", "serp_instant")
         );
         drop(guard);
     }
