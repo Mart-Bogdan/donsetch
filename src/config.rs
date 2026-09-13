@@ -1972,6 +1972,7 @@ const LEGACY_VARS: &[&str] = &[
     "DONSETCH_OUTCOME_FEEDBACK",
     "DONSETCH_NO_MLDSA_SIGALGS",
     "DONSETCH_NO_HOST_PACE_FILE",
+    "DONSETCH_BYPASS",
 ];
 
 /// Every legacy knob still set in the environment (for doctor + show).
@@ -2454,6 +2455,7 @@ pub(crate) fn legacy_target_of(name: &str) -> (&'static str, &'static str) {
         "DONSETCH_NO_SERP_INSTANT" => ("search", "serp_instant"),
         "DONSETCH_NO_MLDSA_SIGALGS" => ("tls", "mldsa_sigalgs"),
         "DONSETCH_NO_HOST_PACE_FILE" => ("fetch", "host_pace_file"),
+        "DONSETCH_BYPASS" => ("bypass", "enabled"),
         "DONSETCH_BROWSER_BACKEND" | "DONGHOST_BROWSER_BACKEND" => ("browser", "backend"),
         "DONGHOST_CHROME" => ("browser", "chromium_path"),
         "DONGHOST_NO_SANDBOX" => ("browser", "no_sandbox"),

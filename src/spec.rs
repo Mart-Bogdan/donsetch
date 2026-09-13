@@ -709,7 +709,7 @@ tiers; the output tells you what happened at every step. \
 Use --focus to narrow the content, --must-contain for a cheap \
 probe, and a result handle from a search result (donsetch fetch \
 @10hd73d) to fetch a result directly. \
---browser-actions sends clicks/typing to a headless browser for \
+--actions sends clicks/typing to a headless browser for \
 sites that need interaction. \
 --archive serves a Wayback snapshot when the live page is dead."
         }

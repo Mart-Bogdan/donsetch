@@ -16,6 +16,14 @@ use crate::fetch::guards::{ensure_url_safe, validate_url_basic};
 
 const WAIT_MS_MAX: u64 = 5000;
 
+/// Viewport is the cheap default (matches CLI --full-page SetTrue:
+/// omitted flag = viewport). Omitting full_page on MCP must NOT
+/// silently mean full-page: that is the expensive path and it made
+/// CLI/MCP disagree on the same call shape.
+fn full_page_arg(args: &Value) -> bool {
+    args.get("full_page").and_then(Value::as_bool).unwrap_or(false)
+}
+
 pub async fn web_screenshot_tool(
     daemon: &Arc<Daemon>,
     args: &Value,
@@ -27,10 +35,7 @@ pub async fn web_screenshot_tool(
             return tool_error("web_screenshot needs a url string");
         }
     };
-    let full_page = args
-        .get("full_page")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let full_page = full_page_arg(args);
     let wait_ms = args
         .get("wait_ms")
         .and_then(Value::as_u64)
@@ -116,4 +121,20 @@ pub async fn web_screenshot_tool(
         tool_error("web_screenshot: deadline exceeded (60s)")
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::full_page_arg;
+    use serde_json::json;
+
+    #[test]
+    fn omitted_full_page_defaults_to_viewport_not_full_page() {
+        // CLI --full-page is SetTrue (omitted = false). MCP omitting
+        // the field used to default true: same call shape, different
+        // expensive path. Viewport is the cheap default on both.
+        assert!(!full_page_arg(&json!({})), "omit = viewport");
+        assert!(!full_page_arg(&json!({"full_page": false})));
+        assert!(full_page_arg(&json!({"full_page": true})));
+    }
 }

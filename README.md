@@ -10,12 +10,12 @@
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/G5Y624N5RE)
 
-> **These docs track `master`, the v4 work in progress.** The current release is v3.6.7. The typed configuration (donsetch.toml, `config show`, `DONSETCH_<SECTION>__<KEY>` env names) described below ships with the next release; v3.6.7 is configured with the legacy environment variables only. Nothing else here is ahead of the release.
+> **These docs track `master`.** The current release is v3.6.7. The typed configuration (donsetch.toml, `config show`, `DONSETCH_<SECTION>__<KEY>` env names) and the v4 workstream below ship with the next release; v3.6.7 is configured with the legacy environment variables only.
 
 [![Rust](https://img.shields.io/badge/Rust-edition%202024-ce422b?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![MCP](https://img.shields.io/badge/MCP-server-7c3aed?logo=modelcontextprotocol&logoColor=white)](https://modelcontextprotocol.io)
 [![License](https://img.shields.io/badge/license-AGPL%203.0-2563eb)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-766%20passed-00d4aa)](#)
+[![Tests](https://img.shields.io/badge/tests-1250%2B%20passed-00d4aa)](#)
 [![npm](https://img.shields.io/npm/v/donsetch?color=cb3837&logo=npm)](https://www.npmjs.com/package/donsetch)
 [![npm downloads](https://img.shields.io/npm/dm/donsetch?color=cb3837&logo=npm&label=downloads)](https://www.npmjs.com/package/donsetch)
 [![GitHub stars](https://img.shields.io/github/stars/dondai44423/donsetch?style=flat&logo=github&color=e3b341)](https://github.com/dondai44423/donsetch/stargazers)
@@ -41,7 +41,7 @@
 > straight into a Bright Data account.
 
 DonSeTch gives any AI agent full web research from a single local process.
-Three tools, zero API keys, zero accounts. Rust, one binary. The fetch
+Four tools, zero API keys, zero accounts. Rust, one binary. The fetch
 and crawl transport is built from scratch: no hyper, no Playwright, no
 Selenium. (BYOK adapters and the opt-in CloakBrowser installer use
 reqwest; the core paths that run on every fetch do not.)
@@ -49,20 +49,49 @@ reqwest; the core paths that run on every fetch do not.)
 Works with every MCP client (Claude Code, Cursor, OpenCode, Pi, Hermes)
 and as a standalone CLI.
 
-> **V4 is coming soon.**
-
 ## ✨ What makes it different
 
 | | What it does |
 |---|---|
-| 🛡️ **Real Chrome TLS** | Drives Chrome's own BoringSSL natively. Your ClientHello IS Chrome's ClientHello. The fingerprint is emergent from the real engine, not a faked table that rots. |
+| 🛡️ **Real Chrome TLS** | Drives Chrome's own BoringSSL natively. Your ClientHello IS Chrome's ClientHello, including ML-DSA signature algorithms. The fingerprint is emergent from the real engine, not a faked table that rots. |
 | ⏱️ **Temporal stealth** | TLS session resumption, conditional revalidation (304), persistent cookies, connection pooling. The loudest remaining bot tell, and nobody else fakes it. |
 | 👻 **Solve-and-bounce** | Browser solves the challenge, hands cookies back to tier 1, goes to sleep. The browser almost never fetches content. |
-| 🧠 **Self-improving fetch** | Learns from every fetch: cookie lifetimes adapt, walls that survive real browsers cool down, searches pre-solve known walls. Converges to optimal routing per domain. |
+| 🧠 **Self-improving fetch** | Learns from every fetch: cookie lifetimes adapt, walls that survive real browsers cool down, searches pre-solve known walls. Converges to optimal routing per domain. Receipts in `status` and `doctor --improve`. |
 | 🔑 **Keyless search** | 10+ backends in parallel, fused by cross-engine consensus + local semantic reranking. No API keys. $0 forever. BYOK optional. |
 | 📄 **Pixel-fusion PDF** | Glyphs + rendered pixels from the same stream, fused deterministically. Per-region trust audit. Scanned PDFs auto-OCR'd. |
 | 🧬 **Built from scratch** | Own HTTP/2 (HPACK, flow control), own extraction engine, own PDF parser, own search aggregator, own crawl engine. |
-| 🪶 **~2k tokens** | Three tools, ~2.0k tokens of total schema (tools/list, measured). Every token earns its place. |
+| 🪶 **~2.4k tokens** | Four tools, ~2.4k tokens of total schema (tools/list, measured). Every token earns its place. |
+| 🩺 **Cracked doctor** | `donsetch doctor` covers config, search health, egress, TLS, browser, DNS, captive portal, secret-store permissions. Detects and (when safe) fixes. |
+
+## 🆕 What's new in v4
+
+Context is still the agent's budget. v4 makes every layer sharper:
+
+| | What it does |
+|---|---|
+| 🌐 **Egress fabric** | Search, fetch, crawl, and ghost share one proxy pool with durable lane health. Sticky per-host fetch lanes, persona-exclusive exits, RTT-aware pacing. Burned lanes survive restarts. |
+| 📈 **Learning engine v2** | Per-intent engine trust, egress-class domain profiles (cookies never cross exits), domain quality priors, crawl governor ladders. Local only. Visible receipts in `status` and `doctor --improve`. |
+| 🔍 **Search v3** | Query compiler (`site:` / `filetype:` / `intitle:` only go to engines that honor them), SERP instant answers with source URLs, adaptive early-return, stress-aware code verticals, tighter snippets. |
+| 🎭 **Persona wire** | Per-domain personas drive Accept-Language, ghost viewport, and `navigator.languages` so tier 1 and the browser claim one identity. |
+| 🩺 **Doctor ultra** | Config posture, search health, clearance stores, DNS, captive portal under `--deep`, 0600 on every secret store. |
+| 🕷️ **Crawl polish** | Cross-process host politeness, configurable resume TTL, versioned dataset JSONL, confirmed transient vs permanent retry. |
+| ⚙️ **Typed config** | `donsetch.toml` + `DONSETCH_<SECTION>__<KEY>` env names + `config show` with redaction. |
+
+## Built in (since v3, still shipping)
+
+| | What it does |
+|---|---|
+| 🔗 **Reference handles** | Links render as `[text](L12)`, search results as `S1…Sn`, and `fetch S3` just works. URLs cost 80 tokens, handles cost 3. Raw URLs stay in `structuredContent`. |
+| 🧾 **Probe mode** | `must_contain` verifies a claim against the fully fetched page but returns MATCH/NO-MATCH + up to 3 excerpts (~60 tokens instead of 4k). |
+| ♻️ **Resurrection fetch** | Dead link? `archive=auto` serves the nearest Wayback snapshot, honestly labeled with its age. |
+| 🕵️ **Anti-cloak check** | On decoy-prone domains, tier-1 responses are equivalence-checked against a headless render. `decoy suspected` is stamped, never silently passed as content. |
+| 📌 **Page memory** | Every fetch is fingerprinted. Re-fetches report `changed` with section-level diffs; `since_last=true` collapses a re-check to one line (~30 tokens). |
+| 🧠 **Domain intelligence** | Reddit, npm/PyPI/crates.io/Go/RubyGems, GitHub, Stack Overflow, Wikipedia, docs sites get restructured from each site's own keyless surfaces, labeled `via=adapter:…`, kill-switchable. |
+| ⏱️ **The clock** | `deadline_ms` everywhere, real MCP cancellation, progress notifications, ms cost footer. Nothing can silently hang. |
+| 🧵 **Article stitching** | `stitch=true` walks `rel=next` into ONE call with part markers. |
+| ⚡ **Warm handoff** | Search pre-fetches top results; the next `fetch S1` serves from cache in ~3ms. |
+| 🧯 **Crash-only daemon** | `donsetch mcp --supervised`: a panic is a blip, the daemon restarts and the session survives. |
+| 🧾 **Stable error codes** | `wall.challenge`, `guard.ssrf`, `deadline.hit`, `archive.stale`… branch on codes, not prose. |
 
 ## 🧭 Pick the right tool for the job
 
@@ -97,24 +126,6 @@ session against a defended site, looking human beats being fast.
 
 **Rule of thumb: one-shot research = DonSeTch. Working a defended
 site like a person to collect things = Bladebro.**
-
-## 🆕 v3, the agent-first upgrade
-
-Context is the agent's budget. v3 saves it aggressively:
-
-| | What it does |
-|---|---|
-| 🔗 **Reference handles** | Links render as `[text](L12)`, search results as `S1…Sn`, and `fetch S3` just works. URLs cost 80 tokens, handles cost 3. Raw URLs stay in `structuredContent`. |
-| 🧾 **Probe mode** | `must_contain` verifies a claim against the fully fetched page but returns MATCH/NO-MATCH + up to 3 excerpts (~60 tokens instead of 4k). |
-| ♻️ **Resurrection fetch** | Dead link? `archive=auto` serves the nearest Wayback snapshot, honestly labeled with its age. |
-| 🕵️ **Anti-cloak check** | On decoy-prone domains, tier-1 responses are equivalence-checked against a headless render. `decoy suspected` is stamped, never silently passed as content. |
-| 📌 **Page memory** | Every fetch is fingerprinted. Re-fetches report `changed` with section-level diffs; `since_last=true` collapses a re-check to one line (~30 tokens). |
-| 🧠 **Domain intelligence** | Reddit, npm/PyPI/crates.io/Go/RubyGems, GitHub, Stack Overflow, Wikipedia, docs sites get restructured from each site's own keyless surfaces, labeled `via=adapter:…`, kill-switchable. |
-| ⏱️ **The clock** | `deadline_ms` everywhere, real MCP cancellation, progress notifications, ms cost footer. Nothing can silently hang. |
-| 🧵 **Article stitching** | `stitch=true` walks `rel=next` into ONE call with part markers. |
-| ⚡ **Warm handoff** | Search pre-fetches top results; the next `fetch S1` serves from cache in ~3ms. |
-| 🧯 **Crash-only daemon** | `donsetch mcp --supervised`: a panic is a blip, the daemon restarts and the session survives. |
-| 🧾 **Stable error codes** | `wall.challenge`, `guard.ssrf`, `deadline.hit`, `archive.stale`… branch on codes, not prose. |
 
 ## 🎬 Demo
 
