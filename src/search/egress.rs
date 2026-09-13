@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 type PaceGate = Arc<tokio::sync::Mutex<Option<Instant>>>;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::transport::proxy::Proxy;
@@ -30,6 +30,7 @@ const MIN_INTERVAL: Duration = Duration::from_millis(1200);
 const JITTER_MS: u64 = 1300;
 const DIRECT_MIN_INTERVAL: Duration = Duration::from_millis(2500);
 const DIRECT_JITTER_MS: u64 = 2000;
+const HEALTH_DISK_VERSION: u32 = 1;
 
 /// Engines known to aggressively block proxy/datacenter IPs.
 /// These prefer the direct lane even when proxies are
@@ -66,6 +67,66 @@ struct PairState {
     burned_until: Option<Instant>,
 }
 
+/// On-disk pair row: engine, egress id, health, remaining burn secs.
+type DiskPair = (String, String, String, u64);
+/// On-disk dead row: egress id, remaining bench secs.
+type DiskDead = (String, u64);
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EgressHealthDisk {
+    #[serde(default = "disk_version")]
+    version: u32,
+    #[serde(default)]
+    pairs: Vec<DiskPair>,
+    #[serde(default)]
+    dead: Vec<DiskDead>,
+}
+
+fn disk_version() -> u32 {
+    HEALTH_DISK_VERSION
+}
+
+fn health_path() -> Option<std::path::PathBuf> {
+    Some(crate::paths::cache_dir().join("egress-health.json"))
+}
+
+fn persist_enabled() -> bool {
+    if crate::config::cfg().state.no_disk_state {
+        return false;
+    }
+    crate::config::cfg().proxy.egress_persist
+}
+
+fn health_to_str(h: Health) -> &'static str {
+    match h {
+        Health::Healthy => "healthy",
+        Health::Suspect => "suspect",
+        Health::Burned => "burned",
+    }
+}
+
+fn health_from_str(s: &str) -> Health {
+    match s {
+        "healthy" => Health::Healthy,
+        "burned" => Health::Burned,
+        _ => Health::Suspect,
+    }
+}
+
+fn remaining_secs(until: Option<Instant>) -> u64 {
+    match until {
+        None => 0,
+        Some(t) => {
+            let now = Instant::now();
+            if t <= now {
+                0
+            } else {
+                t.saturating_duration_since(now).as_secs()
+            }
+        }
+    }
+}
+
 pub struct EgressPool {
     egresses: Vec<Egress>,
     pacing: Mutex<HashMap<(String, String), PaceGate>>,
@@ -78,6 +139,9 @@ pub struct EgressPool {
     /// (scaled x1000: 0 = all good, 1000 = everything fails).
     stress_ok: AtomicU32,
     stress_fail: AtomicU32,
+    /// Set on pair/dead mutation; save swaps it off so an idle
+    /// process never rewrites the file.
+    health_dirty: AtomicBool,
 }
 
 /// Cheap non-crypto jitter from clock nanos (not security,
@@ -102,18 +166,133 @@ impl EgressPool {
                 proxy: Some(p),
             });
         }
-        Self {
+        let pool = Self {
             egresses,
             pacing: Mutex::new(HashMap::new()),
             pairs: Mutex::new(HashMap::new()),
             dead: Mutex::new(HashMap::new()),
             stress_ok: AtomicU32::new(2000), // seed optimistic
             stress_fail: AtomicU32::new(0),
-        }
+            health_dirty: AtomicBool::new(false),
+        };
+        pool.load_health_disk();
+        pool
     }
 
     pub fn from_env() -> Self {
         Self::new(crate::transport::proxy::load_all())
+    }
+
+    /// Load persisted (engine,egress) health and dead-lane benches so a
+    /// restart never re-learns a burned proxy from zero.
+    fn load_health_disk(&self) {
+        if !persist_enabled() {
+            return;
+        }
+        let Some(path) = health_path() else { return };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(disk) = serde_json::from_str::<EgressHealthDisk>(&raw) else {
+            return;
+        };
+        if disk.version != HEALTH_DISK_VERSION {
+            return;
+        }
+        let now = Instant::now();
+        let mut pairs = self
+            .pairs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (engine, egress, health, remaining) in disk.pairs {
+            if remaining == 0 && health_from_str(&health) == Health::Burned {
+                // Expired while the process was down: probation, not burned.
+                pairs.insert(
+                    (engine, egress),
+                    PairState {
+                        health: Health::Suspect,
+                        burned_until: None,
+                    },
+                );
+                continue;
+            }
+            pairs.insert(
+                (engine, egress),
+                PairState {
+                    health: health_from_str(&health),
+                    burned_until: if remaining > 0 {
+                        Some(now + Duration::from_secs(remaining.min(86_400)))
+                    } else {
+                        None
+                    },
+                },
+            );
+        }
+        drop(pairs);
+        let mut dead = self
+            .dead
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (id, remaining) in disk.dead {
+            if remaining > 0 {
+                dead.insert(id, now + Duration::from_secs(remaining.min(86_400)));
+            }
+        }
+    }
+
+    /// Atomic save of pair + dead health. Skipped when persistence is
+    /// off or nothing mutated since the last save.
+    fn save_health_disk_if_dirty(&self) {
+        if !self.health_dirty.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        if !persist_enabled() {
+            return;
+        }
+        let Some(path) = health_path() else { return };
+        let pairs = self
+            .pairs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dead = self
+            .dead
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let disk = EgressHealthDisk {
+            version: HEALTH_DISK_VERSION,
+            pairs: pairs
+                .iter()
+                .map(|((engine, egress), s)| {
+                    (
+                        engine.clone(),
+                        egress.clone(),
+                        health_to_str(s.health).to_string(),
+                        remaining_secs(s.burned_until),
+                    )
+                })
+                .collect(),
+            dead: dead
+                .iter()
+                .map(|(id, until)| (id.clone(), remaining_secs(Some(*until))))
+                .filter(|(_, rem)| *rem > 0)
+                .collect(),
+        };
+        drop(pairs);
+        drop(dead);
+        let Ok(json) = serde_json::to_string(&disk) else {
+            return;
+        };
+        if std::fs::create_dir_all(crate::paths::cache_dir()).is_err() {
+            return;
+        }
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+
+    fn mark_dirty(&self) {
+        self.health_dirty.store(true, Ordering::Relaxed);
     }
 
     /// All configured proxies (for preflight probing).
@@ -240,18 +419,22 @@ impl EgressPool {
     pub fn report_ok(&self, engine: &str, egress_id: &str) {
         let engine = health_key(engine);
         self.stress_record(true);
-        let mut pairs = self
-            .pairs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let s = pairs
-            .entry((engine.to_string(), egress_id.to_string()))
-            .or_insert(PairState {
-                health: Health::Suspect,
-                burned_until: None,
-            });
-        s.health = Health::Healthy;
-        s.burned_until = None;
+        {
+            let mut pairs = self
+                .pairs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let s = pairs
+                .entry((engine.to_string(), egress_id.to_string()))
+                .or_insert(PairState {
+                    health: Health::Suspect,
+                    burned_until: None,
+                });
+            s.health = Health::Healthy;
+            s.burned_until = None;
+        }
+        self.mark_dirty();
+        self.save_health_disk_if_dirty();
     }
 
     /// Engine rejected us (429 / challenge / empty parse):
@@ -259,23 +442,27 @@ impl EgressPool {
     pub fn report_blocked(&self, engine: &str, egress_id: &str) {
         let engine = health_key(engine);
         self.stress_record(false);
-        let mut pairs = self
-            .pairs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let s = pairs
-            .entry((engine.to_string(), egress_id.to_string()))
-            .or_insert(PairState {
-                health: Health::Suspect,
-                burned_until: None,
-            });
-        s.health = match s.health {
-            Health::Healthy => Health::Suspect,
-            _ => {
-                s.burned_until = Some(Instant::now() + BURN_COOLDOWN);
-                Health::Burned
-            }
-        };
+        {
+            let mut pairs = self
+                .pairs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let s = pairs
+                .entry((engine.to_string(), egress_id.to_string()))
+                .or_insert(PairState {
+                    health: Health::Suspect,
+                    burned_until: None,
+                });
+            s.health = match s.health {
+                Health::Healthy => Health::Suspect,
+                _ => {
+                    s.burned_until = Some(Instant::now() + BURN_COOLDOWN);
+                    Health::Burned
+                }
+            };
+        }
+        self.mark_dirty();
+        self.save_health_disk_if_dirty();
     }
 
     /// The egress line itself is dead (connect failure).
@@ -288,6 +475,8 @@ impl EgressPool {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(egress_id.to_string(), Instant::now() + BURN_COOLDOWN);
+        self.mark_dirty();
+        self.save_health_disk_if_dirty();
     }
 
     /// Preflight guard: un-bench every lane (used when the
@@ -297,6 +486,8 @@ impl EgressPool {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        self.mark_dirty();
+        self.save_health_disk_if_dirty();
     }
 
     /// True when the pool has any proxy lanes at all : the
@@ -314,6 +505,8 @@ impl EgressPool {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(egress_id.to_string(), Instant::now() + AUTH_BAN);
+        self.mark_dirty();
+        self.save_health_disk_if_dirty();
     }
 
     /// Pacing with jitter: this (engine, egress) pair is
@@ -399,6 +592,85 @@ mod pacing_tests {
         for engine in ["google", "bing", "ddg", "brave"] {
             pool.report_blocked(engine, "direct");
             assert_eq!(pool.pick(engine, &[], true).unwrap().id, "direct");
+        }
+    }
+
+    /// A burned proxy pair must survive process restart: drop the pool,
+    /// rebuild from the same cache dir, and the next pick must skip that
+    /// lane (not re-learn the burn from zero).
+    #[test]
+    fn burned_pair_survives_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "donsetch-egress-persist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Isolate: cache_dir() reads this env per call.
+        // SAFETY: test-only mutation of the process env; nextest runs
+        // each test in its own process.
+        unsafe {
+            std::env::set_var("DONSETCH_CACHE_DIR", &dir);
+        }
+        let proxy = Proxy::parse("http://127.0.0.1:23456").unwrap();
+        let id = proxy.id();
+        {
+            let pool = EgressPool::new(vec![proxy.clone()]);
+            pool.report_blocked("bing", &id);
+            pool.report_blocked("bing", &id);
+            assert!(pool.pick("bing", &[], false).is_none());
+        }
+        // New process shape: fresh pool, same cache.
+        let pool2 = EgressPool::new(vec![proxy.clone()]);
+        assert!(
+            pool2.pick("bing", &[], false).is_none(),
+            "burned (bing, proxy) pair must survive restart"
+        );
+        // Other engines still work on that lane after the restart.
+        assert_eq!(pool2.pick("yahoo", &[], false).map(|e| e.id), Some(id.clone()));
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe {
+            std::env::remove_var("DONSETCH_CACHE_DIR");
+        }
+    }
+
+    /// DONSETCH_NO_EGRESS_PERSIST must map to the typed knob and prevent
+    /// egress-health.json writes. nextest is process-per-test: env is set
+    /// before the first cfg() touch in this process.
+    #[test]
+    fn persist_kill_switch_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!(
+            "donsetch-egress-nopersist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe {
+            std::env::set_var("DONSETCH_CACHE_DIR", &dir);
+            std::env::set_var("DONSETCH_NO_EGRESS_PERSIST", "1");
+        }
+        assert!(
+            !crate::config::cfg().proxy.egress_persist,
+            "DONSETCH_NO_EGRESS_PERSIST must set proxy.egress_persist=false"
+        );
+        let proxy = Proxy::parse("http://127.0.0.1:23457").unwrap();
+        let pool = EgressPool::new(vec![proxy.clone()]);
+        pool.report_blocked("bing", &proxy.id());
+        pool.report_blocked("bing", &proxy.id());
+        assert!(
+            !dir.join("egress-health.json").exists(),
+            "kill switch must not write egress-health.json"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe {
+            std::env::remove_var("DONSETCH_CACHE_DIR");
+            std::env::remove_var("DONSETCH_NO_EGRESS_PERSIST");
         }
     }
 }

@@ -78,6 +78,7 @@ section!(ProxySection {
     all: String = String::new(),
     no_proxy: String = String::new(),
     pool: Vec<String> = Vec::new(),
+    egress_persist: bool = true,
 });
 
 section!(TlsSection {
@@ -1135,6 +1136,14 @@ fn legacy_layer() -> (VMap, Vec<String>) {
         );
         put(&mut m, "proxy.pool", pool, "DONSEEK_PROXIES");
     }
+    if legacy_flag("DONSETCH_NO_EGRESS_PERSIST") {
+        put(
+            &mut m,
+            "proxy.egress_persist",
+            false.into(),
+            "DONSETCH_NO_EGRESS_PERSIST",
+        );
+    }
 
     // debug
     if std::env::var_os("DONGHOST_DEBUG").is_some() {
@@ -1340,6 +1349,13 @@ pub(crate) fn fieldbook() -> &'static Fieldbook {
             FieldKind::List,
             "(empty)",
             "extra proxy pool, comma-separated",
+        ),
+        (
+            "proxy",
+            "egress_persist",
+            FieldKind::Bool,
+            "true",
+            "persist proxy lane health across restarts",
         ),
         // tls
         (
@@ -1754,6 +1770,7 @@ const LEGACY_VARS: &[&str] = &[
     "DONSETCH_SHADOW_DEADLINE_MS",
     "DONSETCH_NO_ENV_PROXY",
     "DONSEEK_PROXIES",
+    "DONSETCH_NO_EGRESS_PERSIST",
     "DONSETCH_NO_ADAPTERS",
     "DONSETCH_ADAPTER_DUMP",
     "DONSETCH_NO_CRAWL_SHAPE",
@@ -2250,6 +2267,7 @@ pub(crate) fn legacy_target_of(name: &str) -> (&'static str, &'static str) {
         "DONSETCH_SHADOW_DEADLINE_MS" => ("fetch", "shadow_deadline_ms"),
         "DONSETCH_NO_ENV_PROXY" => ("proxy", "from_environment"),
         "DONSEEK_PROXIES" => ("proxy", "pool"),
+        "DONSETCH_NO_EGRESS_PERSIST" => ("proxy", "egress_persist"),
         "DONSETCH_NO_ADAPTERS" => ("fetch", "adapters"),
         "DONSETCH_ADAPTER_DUMP" => ("fetch", "adapter_dump_dir"),
         "DONSETCH_NO_CRAWL_SHAPE" => ("fetch", "crawl_shape"),
