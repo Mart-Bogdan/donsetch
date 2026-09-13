@@ -139,16 +139,51 @@ fn byok_cache_key(query: &str, intent: Intent) -> String {
 /// Whether a failure `status` reflects the engine actually behaving
 /// badly (worth quarantining via `record_outcome` and eroding trust
 /// via `bump_trust`), as opposed to infra noise -- a dead egress
-/// (`"dead-proxy"`), a BYOK key problem (`"auth-fail"`), or simply no
-/// results (`"no-results"`) -- none of which are the engine's fault.
-/// A single predicate so quarantine and trust tracking can't drift
-/// out of sync with each other again.
+/// (`"dead-proxy"`), a BYOK key problem (`"auth-fail"`), or simply
+/// no results (`"no-results"`). Everything else (blocked, empty-parse,
+/// timeout, net) erodes trust. A single predicate so quarantine and
+/// trust tracking can't drift out of sync with each other again.
 fn is_engine_fault(status: &str) -> bool {
     !status.starts_with("dead")
         && status != "auth-fail"
         && status != "no-results"
         && status != "invalid-config"
         && status != "pacing-timeout"
+}
+
+/// C1 roster hygiene: Mojeek answers blocked traffic with HTTP 200
+/// and a parse that yields <3 hits (`empty-parse`). That is a
+/// CHRONIC signal, not a one-off — burn trust harder so it drops
+/// out of the default width instead of occupying a slot every
+/// query. The parser stays; proxy paths still fan out to it.
+fn trust_target_for(engine: &str, status: &str, ok: bool) -> f64 {
+    if ok {
+        return 1.2;
+    }
+    if engine == "mojeek" && status == "empty-parse" {
+        return 0.15;
+    }
+    0.3
+}
+
+/// C4: enough independent families already agree on a top-3 URL
+/// that waiting for the stragglers cannot change the answer.
+fn early_consensus_enough(outcomes: &[(String, EngineResult)]) -> bool {
+    use std::collections::{HashMap, HashSet};
+    let mut url_families: HashMap<String, HashSet<&str>> = HashMap::new();
+    let mut families_ok: HashSet<&str> = HashSet::new();
+    for (label, result) in outcomes {
+        let Ok((hits, _, _, _)) = result else {
+            continue;
+        };
+        let fam = rank::engine_family(engine_name(label));
+        families_ok.insert(fam);
+        for h in hits.iter().take(3) {
+            let key = rank::norm_key(&h.url);
+            url_families.entry(key).or_default().insert(fam);
+        }
+    }
+    families_ok.len() >= 3 && url_families.values().any(|fams| fams.len() >= 3)
 }
 
 pub struct Searcher {
@@ -674,7 +709,28 @@ impl Searcher {
             )));
         }
 
-        let outcomes = futures_util::future::join_all(futures).await;
+        // C4 adaptive early-return: collect completions as they
+        // land; once ≥3 independent families agree on a top-3 URL,
+        // drop the stragglers (their futures are cancelled). Kill:
+        // search.search_early=false / DONSETCH_NO_SEARCH_EARLY.
+        let early = crate::config::cfg().search.search_early;
+        let outcomes: Vec<(String, EngineResult)> = if early {
+            use futures_util::stream::{FuturesUnordered, StreamExt};
+            let mut futs = FuturesUnordered::new();
+            for f in futures {
+                futs.push(f);
+            }
+            let mut acc: Vec<(String, EngineResult)> = Vec::new();
+            while let Some(outcome) = futs.next().await {
+                acc.push(outcome);
+                if early_consensus_enough(&acc) {
+                    break;
+                }
+            }
+            acc
+        } else {
+            futures_util::future::join_all(futures).await
+        };
 
         // ── Retry wave: failed engines get one more shot
         // through a fresh egress : but ONLY when the first
@@ -855,7 +911,7 @@ impl Searcher {
                         }
                     }
                     if (was_engine || ghost_lane) && is_engine_fault(&status) {
-                        self.bump_trust(base, intent, false);
+                        self.bump_trust_status(base, intent, false, &status);
                     }
                     report.push(EngineReport {
                         engine,
@@ -1040,7 +1096,13 @@ impl Searcher {
     }
 
     fn bump_trust(&self, base_engine: &str, intent: Intent, ok: bool) {
-        let target = if ok { 1.2 } else { 0.3 };
+        self.bump_trust_status(base_engine, intent, ok, "");
+    }
+
+    /// C1: Mojeek `empty-parse` (blocked:200) burns trust harder so
+    /// it leaves the default width instead of occupying a slot.
+    fn bump_trust_status(&self, base_engine: &str, intent: Intent, ok: bool, status: &str) {
+        let target = trust_target_for(base_engine, status, ok);
         {
             let mut trust = self
                 .trust
@@ -1568,6 +1630,60 @@ mod tests {
         assert!(is_engine_fault("timeout"));
         assert!(is_engine_fault("no-url"));
         assert!(is_engine_fault("net"));
+    }
+
+    #[test]
+    fn mojeek_empty_parse_burns_trust_harder() {
+        assert_eq!(trust_target_for("mojeek", "empty-parse", false), 0.15);
+        assert_eq!(trust_target_for("bing", "empty-parse", false), 0.3);
+        assert_eq!(trust_target_for("mojeek", "blocked:429", false), 0.3);
+        assert_eq!(trust_target_for("mojeek", "ok", true), 1.2);
+    }
+
+    #[test]
+    fn early_consensus_needs_three_families_on_a_shared_top3() {
+        use crate::search::engines::Hit;
+        let hit = |url: &str, rank: usize| Hit {
+            title: "t".into(),
+            url: url.into(),
+            snippet: "s".into(),
+            rank,
+            published: None,
+        };
+        let ok = |engine: &str, urls: &[&str]| {
+            (
+                engine.to_string(),
+                Ok((
+                    urls.iter()
+                        .enumerate()
+                        .map(|(i, u)| hit(u, i + 1))
+                        .collect::<Vec<_>>(),
+                    10u64,
+                    "direct".to_string(),
+                    true,
+                )),
+            )
+        };
+        // Two families only: not enough.
+        let two = vec![
+            ok("brave", &["https://a.com/x", "https://b.com/y"]),
+            ok("bing", &["https://a.com/x", "https://b.com/y"]),
+        ];
+        assert!(!early_consensus_enough(&two));
+        // Three families, shared top URL: enough.
+        let three = vec![
+            ok("brave", &["https://a.com/x", "https://b.com/y"]),
+            ok("bing", &["https://a.com/x", "https://c.com/z"]),
+            ok("mojeek", &["https://a.com/x", "https://d.com/w"]),
+        ];
+        assert!(early_consensus_enough(&three));
+        // Three families but no shared top-3 URL: not enough.
+        let disjoint = vec![
+            ok("brave", &["https://a.com/x"]),
+            ok("bing", &["https://b.com/y"]),
+            ok("mojeek", &["https://c.com/z"]),
+        ];
+        assert!(!early_consensus_enough(&disjoint));
     }
 
     #[test]

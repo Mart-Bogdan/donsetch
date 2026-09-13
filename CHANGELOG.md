@@ -69,6 +69,12 @@ channel until the v4.0.0 release train.
   explains the loop in ~10 lines with live local receipts and kill
   switches. No MCP tool, no telemetry, no cross-machine sharing.
   A 24h soak battery still gates any public improve claim.
+- **Search v3 (partial):** adaptive early-return cancels stragglers
+  once ≥3 independent index families already agree on a top-3 URL
+  (kill `DONSETCH_NO_SEARCH_EARLY`). Mojeek `empty-parse` (blocked
+  as HTTP 200) burns engine trust harder so it leaves the default
+  width instead of occupying a slot every query. Compact snippets
+  trim to 180 chars.
 - `just win-check`: type-checks the crate for `x86_64-pc-windows-gnu`
   from Linux (clippy, no linkage), both `--no-default-features` and
   the full feature set, so `#[cfg(windows)]` breakage from a

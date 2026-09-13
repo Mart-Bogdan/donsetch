@@ -11,10 +11,10 @@ use super::rank;
 /// Snippet budget for the markdown list. 120 cut mid-phrase far
 /// too often : the detail that distinguishes two results sat just
 /// past the cut, and the agent paid a whole fetch to learn what the
-/// snippet nearly said. 200 is where a snippet reliably carries one
-/// complete claim; the 300 the JSON keeps is past diminishing
-/// returns at ~45 tokens per result.
-const SNIPPET_CHARS: usize = 200;
+/// snippet nearly said. 180 (v4 C token trim) is where a snippet
+/// still reliably carries one complete claim while saving ~3 tokens
+/// per result vs 200 across the default 7.
+const SNIPPET_CHARS: usize = 180;
 
 /// Below this fraction (4/5) of the budget, a word-boundary cut
 /// throws away more than it saves : see `clip_snippet`.

@@ -138,6 +138,9 @@ section!(SearchSection {
     /// DEFAULT OFF until the 24h soak proves it. Never triggers
     /// extra fetches; only soft-demotes (class, host) for ranking.
     outcome_feedback: bool = false,
+    /// C4: cancel stragglers once ≥3 independent families agree
+    /// on a top-3 URL. Kill: DONSETCH_NO_SEARCH_EARLY.
+    search_early: bool = true,
 });
 
 section!(BrowserSection {
@@ -1178,6 +1181,14 @@ fn legacy_layer() -> (VMap, Vec<String>) {
             "DONSETCH_OUTCOME_FEEDBACK",
         );
     }
+    if legacy_flag("DONSETCH_NO_SEARCH_EARLY") {
+        put(
+            &mut m,
+            "search.search_early",
+            false.into(),
+            "DONSETCH_NO_SEARCH_EARLY",
+        );
+    }
 
     // debug
     if std::env::var_os("DONGHOST_DEBUG").is_some() {
@@ -1634,6 +1645,13 @@ pub(crate) fn fieldbook() -> &'static Fieldbook {
             FieldKind::Bool,
             "false",
             "agent-outcome demotes (must_contain miss / content_ok=false); default off until soak",
+        ),
+        (
+            "search",
+            "search_early",
+            FieldKind::Bool,
+            "true",
+            "cancel stragglers when ≥3 index families already agree on a top-3 URL",
         ),
         // browser
         (
@@ -2348,6 +2366,7 @@ pub(crate) fn legacy_target_of(name: &str) -> (&'static str, &'static str) {
         "DONSETCH_BRIGHTDATA_ZONE" => ("search", "brightdata_zone"),
         "DONSETCH_NO_QUALITY_PRIOR" => ("search", "quality_prior"),
         "DONSETCH_OUTCOME_FEEDBACK" => ("search", "outcome_feedback"),
+        "DONSETCH_NO_SEARCH_EARLY" => ("search", "search_early"),
         "DONSETCH_BROWSER_BACKEND" | "DONGHOST_BROWSER_BACKEND" => ("browser", "backend"),
         "DONGHOST_CHROME" => ("browser", "chromium_path"),
         "DONGHOST_NO_SANDBOX" => ("browser", "no_sandbox"),
@@ -3292,6 +3311,28 @@ mod tests {
         assert_eq!(
             legacy_target_of("DONSETCH_OUTCOME_FEEDBACK"),
             ("search", "outcome_feedback")
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn search_early_defaults_on_and_honors_kill_switch() {
+        let guard = clean_env();
+        set_env("DONSETCH_NO_CONFIG_FILE", "1");
+        let loaded = load().expect("defaults");
+        assert!(
+            loaded.config.search.search_early,
+            "search.search_early must default true"
+        );
+        set_env("DONSETCH_NO_SEARCH_EARLY", "1");
+        let loaded = load().expect("kill switch");
+        assert!(
+            !loaded.config.search.search_early,
+            "DONSETCH_NO_SEARCH_EARLY must map to search.search_early=false"
+        );
+        assert_eq!(
+            legacy_target_of("DONSETCH_NO_SEARCH_EARLY"),
+            ("search", "search_early")
         );
         drop(guard);
     }
