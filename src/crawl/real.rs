@@ -82,6 +82,11 @@ pub fn build(fetcher: Arc<Fetcher>, pool: Arc<EgressPool>) -> (Crawler, Arc<Gove
                 // Proxy lanes: shared jar OUT : one cookie carrying
                 // lane B's identity would link the two egress IPs.
                 let use_jar = proxy.is_none();
+                // v4 F2: cross-process politeness floor. The in-process
+                // governor already spaced this request; a second
+                // donsetch process on the same host still needs a
+                // shared last-stamp. Best-effort, kill-switchable.
+                crate::crawl::host_pace::wait_and_stamp(&host).await;
                 match fetcher
                     .fetch_via_jar_ref(&fetch_url, proxy.as_ref(), use_jar, referer.as_deref())
                     .await

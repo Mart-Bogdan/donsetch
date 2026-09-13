@@ -116,11 +116,15 @@ channel until the v4.0.0 release train.
   perfect ru-RU JA4H tell). The ghost browser launches with the
   persona's viewport and `--lang`, and CDP `navigator.languages`
   matches. Quarantined personas fall back to the default wire.
-- **Crawl polish (v4 F, partial):** dataset JSONL rows carry
+- **Crawl polish (v4 F):** dataset JSONL rows carry
   `dataset_version: 1` in structuredContent; resume-token TTL is
   `fetch.resume_ttl_secs` (default 7200, clamped 300..86400) instead
-  of a hardcoded 2h. Canonical/binary skip and transient-vs-permanent
-  retry were already on master; reconfirmed with tests.
+  of a hardcoded 2h. Cross-process host politeness: crawls share a
+  per-host last-stamp file under `<cache>/host-pace/` so a daemon and
+  a CLI crawl of the same host respect one floor gap (kill:
+  `DONSETCH_NO_HOST_PACE_FILE`; corrupt file = ignore). Canonical/
+  binary skip and transient-vs-permanent retry were already on
+  master; reconfirmed with tests.
 - `just win-check`: type-checks the crate for `x86_64-pc-windows-gnu`
   from Linux (clippy, no linkage), both `--no-default-features` and
   the full feature set, so `#[cfg(windows)]` breakage from a

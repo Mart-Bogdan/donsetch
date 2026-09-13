@@ -7,6 +7,7 @@
 
 pub mod frontier;
 pub mod governor;
+pub mod host_pace;
 pub mod real;
 pub mod score;
 pub mod sitemap;

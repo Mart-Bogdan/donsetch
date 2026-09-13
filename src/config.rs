@@ -114,6 +114,7 @@ section!(FetchSection {
     ocr: bool = true,
     ocr_max_pages: u32 = 25,
     resume_ttl_secs: u64 = 7200,
+    host_pace_file: bool = true,
 });
 
 section!(BypassSection {
@@ -1221,6 +1222,14 @@ fn legacy_layer() -> (VMap, Vec<String>) {
             "DONSETCH_NO_MLDSA_SIGALGS",
         );
     }
+    if legacy_flag("DONSETCH_NO_HOST_PACE_FILE") {
+        put(
+            &mut m,
+            "fetch.host_pace_file",
+            false.into(),
+            "DONSETCH_NO_HOST_PACE_FILE",
+        );
+    }
 
     // debug
     if std::env::var_os("DONGHOST_DEBUG").is_some() {
@@ -1577,6 +1586,13 @@ pub(crate) fn fieldbook() -> &'static Fieldbook {
             FieldKind::Int,
             "7200",
             "crawl resume-token TTL seconds (clamped 300..86400)",
+        ),
+        (
+            "fetch",
+            "host_pace_file",
+            FieldKind::Bool,
+            "true",
+            "cross-process per-host politeness file for crawls",
         ),
         // bypass
         (
@@ -1955,6 +1971,7 @@ const LEGACY_VARS: &[&str] = &[
     "DONSETCH_NO_QUALITY_PRIOR",
     "DONSETCH_OUTCOME_FEEDBACK",
     "DONSETCH_NO_MLDSA_SIGALGS",
+    "DONSETCH_NO_HOST_PACE_FILE",
 ];
 
 /// Every legacy knob still set in the environment (for doctor + show).
@@ -2436,6 +2453,7 @@ pub(crate) fn legacy_target_of(name: &str) -> (&'static str, &'static str) {
         "DONSETCH_NO_QUERY_COMPILE" => ("search", "query_compile"),
         "DONSETCH_NO_SERP_INSTANT" => ("search", "serp_instant"),
         "DONSETCH_NO_MLDSA_SIGALGS" => ("tls", "mldsa_sigalgs"),
+        "DONSETCH_NO_HOST_PACE_FILE" => ("fetch", "host_pace_file"),
         "DONSETCH_BROWSER_BACKEND" | "DONGHOST_BROWSER_BACKEND" => ("browser", "backend"),
         "DONGHOST_CHROME" => ("browser", "chromium_path"),
         "DONGHOST_NO_SANDBOX" => ("browser", "no_sandbox"),
@@ -3468,6 +3486,28 @@ mod tests {
         assert_eq!(
             legacy_target_of("DONSETCH_NO_MLDSA_SIGALGS"),
             ("tls", "mldsa_sigalgs")
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn host_pace_file_defaults_on_and_honors_kill_switch() {
+        let guard = clean_env();
+        set_env("DONSETCH_NO_CONFIG_FILE", "1");
+        let loaded = load().expect("defaults");
+        assert!(
+            loaded.config.fetch.host_pace_file,
+            "fetch.host_pace_file must default true"
+        );
+        set_env("DONSETCH_NO_HOST_PACE_FILE", "1");
+        let loaded = load().expect("kill switch");
+        assert!(
+            !loaded.config.fetch.host_pace_file,
+            "DONSETCH_NO_HOST_PACE_FILE must map to fetch.host_pace_file=false"
+        );
+        assert_eq!(
+            legacy_target_of("DONSETCH_NO_HOST_PACE_FILE"),
+            ("fetch", "host_pace_file")
         );
         drop(guard);
     }
