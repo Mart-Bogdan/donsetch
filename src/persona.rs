@@ -142,13 +142,12 @@ fn env_locale() -> String {
     }
     for v in sources {
         let base = v.split('.').next().unwrap_or("").replace('_', "-");
-        let mut parts = base.split('-');
-        let lang = parts.next().unwrap_or("");
-        if lang.len() >= 2 && lang.len() <= 3 && lang.chars().all(|c| c.is_ascii_lowercase()) {
-            return match parts.next() {
-                Some(region) if !region.is_empty() => format!("{lang}-{region}"),
-                _ => lang.to_string(),
-            };
+        // Charset + shape gate: a LANG like "en_US\r\nX: y" must not
+        // become the persona locale (it would re-mint forever and
+        // feed header/JS injection downstream).
+        let sanitized = sanitize_locale(&base);
+        if sanitized != "en-US" || base.eq_ignore_ascii_case("en-US") || base == "en" {
+            return sanitized;
         }
     }
     "en-US".to_string()
@@ -240,6 +239,34 @@ fn valid_locale(locale: &str) -> bool {
         Some(region) => {
             (2..=4).contains(&region.len()) && region.chars().all(|c| c.is_ascii_alphabetic())
         }
+    }
+}
+
+/// Fail-closed locale sanitizer (v4 hardening). A corrupt on-disk
+/// persona or a hostile `persona.locale` / LANG value must never
+/// reach Chrome `--lang`, CDP `navigator.languages` injection, or an
+/// Accept-Language header. Only the valid_locale charset survives;
+/// anything else falls back to en-US.
+pub(crate) fn sanitize_locale(raw: &str) -> String {
+    let candidate = raw.trim();
+    // Hard charset gate first: no CR/LF, no quotes, no JS, no commas.
+    let charset_ok = !candidate.is_empty()
+        && candidate.len() <= 16
+        && candidate
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if charset_ok && valid_locale(candidate) {
+        // Canonical case: lang lower, region upper (en-US).
+        let mut parts = candidate.split('-');
+        let lang = parts.next().unwrap_or("").to_ascii_lowercase();
+        match parts.next() {
+            Some(region) if !region.is_empty() => {
+                format!("{lang}-{}", region.to_ascii_uppercase())
+            }
+            _ => lang,
+        }
+    } else {
+        "en-US".to_string()
     }
 }
 
@@ -350,5 +377,24 @@ mod tests {
         // Corrupt viewport is clamped, never passed to Chrome.
         p.viewport = (10, 10);
         assert_eq!(p.ghost_wire().viewport, (800, 600));
+    }
+
+    #[test]
+    fn sanitize_locale_blocks_js_and_header_injection() {
+        assert_eq!(sanitize_locale("de-DE"), "de-DE");
+        assert_eq!(sanitize_locale("en"), "en");
+        assert_eq!(
+            sanitize_locale("en-x'); fetch('http://evil');//"),
+            "en-US",
+            "JS breakout in locale must fall back"
+        );
+        assert_eq!(
+            sanitize_locale("en-US\r\nX: y"),
+            "en-US",
+            "CR/LF must fall back"
+        );
+        assert_eq!(sanitize_locale("en-US,fr"), "en-US");
+        assert_eq!(sanitize_locale(""), "en-US");
+        assert_eq!(sanitize_locale("EN-us"), "en-US", "canonical case");
     }
 }

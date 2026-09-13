@@ -324,6 +324,12 @@ pub fn accept_language_for(host: &str, path: &str) -> &'static str {
 /// "en-US browser speaking perfect ru-RU" JA4H tell.
 pub fn accept_language_with_persona(host: &str, path: &str, persona_locale: &str) -> String {
     let base = accept_language_for(host, path);
+    // Fail-closed: the full locale is interpolated into a header.
+    // CR/LF would be rejected later by the header guard (and turn
+    // every fetch into a hard error); commas and JS must never get
+    // that far.
+    let persona_locale = crate::persona::sanitize_locale(persona_locale);
+    let persona_locale = persona_locale.as_str();
     let plang = persona_locale.split('-').next().unwrap_or("").to_ascii_lowercase();
     if plang.len() < 2 || plang.len() > 3 || !plang.chars().all(|c| c.is_ascii_alphabetic()) {
         return base.to_string();
@@ -651,9 +657,22 @@ mod locale_tests {
         // de-DE persona on a .de page: persona-shaped, not the raw TLD string.
         let al = accept_language_with_persona("example.de", "/", "de-DE");
         assert!(al.starts_with("de-DE,de;q=0.9"), "{al}");
-        // Invalid persona locale falls back to the TLD default.
+        // Invalid persona locale is sanitized to en-US, then the TLD
+        // signal is kept as a lower-q preference (not a raw fallthrough).
         let al = accept_language_with_persona("example.ru", "/", "nope");
-        assert!(al.starts_with("ru-RU"), "{al}");
+        assert!(al.starts_with("en-US"), "{al}");
+        assert!(al.contains("ru-RU"), "TLD kept as secondary: {al}");
+        // Hostile locale is sanitized, never interpolated raw.
+        let al = accept_language_with_persona(
+            "example.com",
+            "/",
+            "en-US\r\nX: y",
+        );
+        assert!(
+            !al.contains('\r') && !al.contains('\n'),
+            "CR/LF must never reach the header: {al:?}"
+        );
+        assert!(al.starts_with("en-US"), "{al}");
     }
 }
 

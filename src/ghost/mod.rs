@@ -131,11 +131,9 @@ impl GhostWire {
         // corrupt on-disk persona can never pass a nonsense --window-size.
         let w = w.clamp(800, 4000);
         let h = h.clamp(600, 3000);
-        let locale = if p.locale.is_empty() {
-            "en-US".to_string()
-        } else {
-            p.locale.clone()
-        };
+        // Fail-closed: a hostile locale must never reach --lang or the
+        // CDP navigator.languages injection.
+        let locale = crate::persona::sanitize_locale(&p.locale);
         Self {
             viewport: (w, h),
             locale,

@@ -61,13 +61,29 @@ pub async fn web_screenshot_tool(
     // notifications/cancelled while it did.
     let work = async {
         let inner: Result<serde_json::Value, serde_json::Value> = async {
-            let mut ghost = match daemon
-                .ghost_mgr
-                .acquire_for(&daemon.profile, Some(&host))
-                .await
-            {
-                Ok(g) => g,
-                Err(e) => return Err(tool_error(format!("web_screenshot: no browser: {e}"))),
+            let mut ghost = {
+                // v4 E2: screenshot must claim the same persona wire
+                // as tier-1 (viewport + locale), or the capture is a
+                // different identity than the page we just fetched.
+                let wire = {
+                    let state = daemon.state.lock().await;
+                    state
+                        .personas
+                        .get(host.as_str())
+                        .filter(|p| p.quarantine_reason.is_none())
+                        .map(|p| p.ghost_wire())
+                        .unwrap_or_default()
+                };
+                match daemon
+                    .ghost_mgr
+                    .acquire_for_wire(&daemon.profile, Some(&host), wire)
+                    .await
+                {
+                    Ok(g) => g,
+                    Err(e) => {
+                        return Err(tool_error(format!("web_screenshot: no browser: {e}")));
+                    }
+                }
             };
 
             if let Err(e) =

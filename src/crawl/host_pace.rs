@@ -93,7 +93,14 @@ fn prune(dir: &Path) {
     let mut alive: Vec<(u64, PathBuf)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+        let ext = path.extension().and_then(|x| x.to_str());
+        // Failed atomic writes leave *.tmp behind; never treat them
+        // as live rows, always drop them.
+        if ext == Some("tmp") {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        if ext != Some("json") {
             continue;
         }
         let last = read_pace(&path).map(|p| p.last_ms).unwrap_or(0);
@@ -129,7 +136,9 @@ pub async fn wait_and_stamp(host: &str) -> Duration {
     // One read, at most one sleep, then stamp. A concurrent writer
     // may land inside the window; the floor is best-effort, not a
     // distributed lock.
-    if let Some(row) = read_pace(&path) {
+    if let Some(row) = read_pace(&path)
+        && row.host == host
+    {
         let last = row.last_ms;
         let now = now_ms();
         let due = last.saturating_add(gap.as_millis() as u64);

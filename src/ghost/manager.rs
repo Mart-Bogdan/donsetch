@@ -74,6 +74,11 @@ struct Slot {
     /// Host affinity hint: the host of the last acquire this slot
     /// served. A repeat hit on that host reuses the session state.
     host: Option<String>,
+    /// Wire identity (viewport + locale) this browser was launched
+    /// with. A warm ghost whose wire differs from the incoming
+    /// persona (quarantine → re-mint changed locale/viewport) must
+    /// relaunch: tier-1 already sent the new Accept-Language.
+    wire: Option<crate::ghost::GhostWire>,
 }
 
 pub struct GhostManager {
@@ -238,6 +243,7 @@ impl GhostManager {
                 ghost: None,
                 key: None,
                 host: None,
+                wire: None,
             })
             .collect();
         let meta: Vec<Snap> = slots
@@ -307,10 +313,27 @@ impl GhostManager {
                 old.kill().await;
                 guard.key = None;
                 guard.host = None;
+                guard.wire = None;
             }
+        }
+        // Warm ghost whose viewport/locale no longer matches the
+        // incoming persona (quarantine re-mint) must relaunch: the
+        // browser's navigator.languages / window size would disagree
+        // with the Accept-Language tier-1 already sent.
+        if guard.wire.as_ref().is_some_and(|w| *w != wire) {
+            if crate::config::cfg().debug.ghost {
+                eprintln!("[pool] wire mismatch on warm slot, relaunching");
+            }
+            if let Some(mut old) = guard.ghost.take() {
+                old.kill().await;
+            }
+            guard.key = None;
+            guard.host = None;
+            guard.wire = None;
         }
         guard.key = Some(key);
         guard.host = host.map(|h| h.to_string());
+        guard.wire = Some(wire.clone());
         let need_launch = match guard.ghost.as_mut() {
             None => true,
             Some(g) => !g.thaw(),

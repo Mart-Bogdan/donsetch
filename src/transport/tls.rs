@@ -116,10 +116,17 @@ pub(crate) fn effective_sigalgs(profile: &BrowserProfile, handshake: HandshakePr
         return sig.to_string();
     }
     // Drop leading mldsa44:mldsa65:mldsa87: (and any stray mldsa token).
-    sig.split(':')
+    let stripped = sig
+        .split(':')
         .filter(|t| !t.starts_with("mldsa"))
         .collect::<Vec<_>>()
-        .join(":")
+        .join(":");
+    // Latent guard: an mldsa-only profile would strip to "" and
+    // set_sigalgs_list would error. Never ship an empty list.
+    if stripped.is_empty() {
+        return "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256".to_string();
+    }
+    stripped
 }
 
 pub fn build_connector(profile: &BrowserProfile) -> Result<SslConnector, FetchError> {

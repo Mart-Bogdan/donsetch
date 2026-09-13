@@ -21,6 +21,18 @@ channel until the v4.0.0 release train.
   new surface).
 
 ### Fixed
+- Persona locale is fail-closed sanitized before it can reach Chrome
+  `--lang`, CDP `navigator.languages` injection, or an
+  Accept-Language header. A corrupt on-disk persona or hostile
+  `persona.locale` / LANG value can no longer break out of the JS
+  array or inject header bytes; invalid values become `en-US`.
+- A warm ghost whose viewport/locale no longer matches the incoming
+  persona (quarantine re-mint) now relaunches instead of silently
+  claiming the old identity. `web_screenshot` uses the same persona
+  wire as tier-1.
+- Cross-process host-pace rows are compared by host on read (FNV
+  collision no longer shares a floor) and stale `.tmp` files from
+  failed atomic writes are pruned.
 - PDF glyph walk no longer panics when the first glyph's font has no
   PDFium-reportable name (Type3, missing BaseFont, over-long name).
   The mono-font check now bounds-checks the family index like the
@@ -31,6 +43,10 @@ channel until the v4.0.0 release train.
   `Rust 1.75`) no longer collapse into one result and silently drop
   the other. Only titles that are identical after case/whitespace
   normalization still dedup. (#222)
+- `web_screenshot` omitted `full_page` now defaults to viewport on
+  both CLI and MCP (MCP used to silently mean full-page).
+- Fetch CLI long-help cites `--actions`, not the dead
+  `--browser-actions`.
 
 ### Changed
 - `donsetch config show` redacts bearer tokens and credential-bearing proxy
