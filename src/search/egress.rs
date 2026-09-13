@@ -746,6 +746,21 @@ impl EgressPool {
         None
     }
 
+    /// True when the host's sticky lane is a proxy (not direct).
+    /// Read-only: does not assign a lane.
+    pub fn sticky_is_proxy(&self, host: &str) -> bool {
+        let Some(id) = self
+            .sticky
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(host)
+            .cloned()
+        else {
+            return false;
+        };
+        id != "direct"
+    }
+
     /// Drop the host's sticky lane so the next pick rotates.
     /// Does not change health: rotation is the signal.
     pub fn rotate_fetch(&self, host: &str) {

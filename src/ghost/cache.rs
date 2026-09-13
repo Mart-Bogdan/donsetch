@@ -155,6 +155,13 @@ pub struct DomainProfile {
     /// on connection-refused against port 80).
     #[serde(default)]
     pub origin_port: u16,
+    /// v4 B1: which egress class these cookies were learned on
+    /// (`"direct"` or `"proxy"`). Cookies never cross egress
+    /// classes: a Warm route is refused when the live lane's class
+    /// differs. `None` = pre-B1 / unstamped (treat as match until
+    /// the next success stamps the real class).
+    #[serde(default)]
+    pub egress_class: Option<String>,
 }
 
 fn default_scheme() -> String {
@@ -172,7 +179,8 @@ fn state_version_v1() -> u32 {
 /// Current on-disk state format. Bump when a load-time migration
 /// becomes historical; migrations gate on `version < N` so they
 /// run exactly once per state file.
-const STATE_VERSION: u32 = 2;
+/// v3 (B1): DomainProfile.egress_class; no destructive migration.
+const STATE_VERSION: u32 = 3;
 
 impl DomainProfile {
     /// Most recent signal of any kind; the LRU eviction key.
@@ -355,6 +363,23 @@ fn route_memory_enabled() -> bool {
 
 fn route_memory_readonly() -> bool {
     crate::config::cfg().state.route_memory == crate::config::RouteMemory::ReadOnly
+}
+
+/// Live egress class for `host` (v4 B1): `"proxy"` when a sticky
+/// pool lane is a proxy exit, else `"direct"`. No pool / no sticky
+/// = direct (the historical default).
+pub fn current_egress_class(host: &str) -> &'static str {
+    let Some(pool) = crate::search::egress::global() else {
+        return "direct";
+    };
+    if !pool.has_proxies() || !crate::config::cfg().proxy.fetch_rotate {
+        return "direct";
+    }
+    if pool.sticky_is_proxy(host) {
+        "proxy"
+    } else {
+        "direct"
+    }
 }
 
 // ────────────────────────── constants ──────────────────────────
@@ -1293,6 +1318,16 @@ impl GhostState {
     }
 
     pub fn route_for(&self, host: &str) -> RouteDecision {
+        let class = current_egress_class(host);
+        self.route_for_class(host, class)
+    }
+
+    /// Route with an explicit egress class (v4 B1). A Warm cookie
+    /// vault learned on another class is never injected: clearance
+    /// bound to a home IP must not ride a proxy exit (and vice
+    /// versa). `None`/unstamped profiles stay usable until the next
+    /// success stamps the real class.
+    pub fn route_for_class(&self, host: &str, class: &str) -> RouteDecision {
         if !route_memory_enabled() {
             return RouteDecision::Cold;
         }
@@ -1314,16 +1349,21 @@ impl GhostState {
                 );
             }
         }
+        // Egress-class gate (B1): cookies never cross classes.
+        let class_ok = match &profile.egress_class {
+            None => true,
+            Some(c) => c == class,
+        };
         if profile.needs_tier2 {
             // Warm only when cookies are fresh AND tier-1 replay has
             // actually been verified to work for this domain. Vendors
             // that bind clearance to the browser fingerprint reject
             // tier-1 replay forever : serving Warm there just burns a
             // doomed roundtrip before every solve.
-            if cookies_fresh_at(profile, n) && profile.replay_ok {
+            if class_ok && cookies_fresh_at(profile, n) && profile.replay_ok {
                 return RouteDecision::Warm(profile.cookies.clone());
             }
-            // Cookies stale. Should we recheck cold?
+            // Cross-class or stale cookies. Should we recheck cold?
             if n - profile.last_cold_check > RECHECK_INTERVAL {
                 return RouteDecision::RecheckCold;
             }
@@ -1404,6 +1444,7 @@ impl GhostState {
             p.observed_lifetime = None;
             p.replay_ok = false;
         }
+        p.egress_class = Some(current_egress_class(host).to_string());
         self.save();
     }
 
@@ -1458,6 +1499,7 @@ impl GhostState {
                 p.cookies.push(new.clone());
             }
         }
+        p.egress_class = Some(current_egress_class(host).to_string());
         self.save();
     }
 
@@ -1907,7 +1949,7 @@ mod tests {
         }
         state.version = STATE_VERSION;
         assert!(!state.profiles["walled.example"].needs_tier2);
-        assert_eq!(state.version, 2);
+        assert_eq!(state.version, STATE_VERSION);
 
         // Now the host legitimately re-earns its wall (a real
         // challenge verdict), gets saved at version 2, and the next
@@ -1923,6 +1965,70 @@ mod tests {
             panic!("v2 file must never enter the migration");
         }
         assert!(state2.profiles["walled.example"].needs_tier2);
+    }
+
+    /// B1 anti-amnesia: a pre-B1 (v2) state file loads without
+    /// wiping wall knowledge; egress_class starts unstamped (None).
+    #[test]
+    fn b1_egress_class_defaults_none_and_preserves_walls() {
+        let mut state = GhostState {
+            version: 2,
+            ..Default::default()
+        };
+        state.profiles.insert(
+            "cf.example".into(),
+            DomainProfile {
+                needs_tier2: true,
+                replay_ok: true,
+                solve_count: 3,
+                wall_vendor: Some("cloudflare".into()),
+                last_solved: now(),
+                ..Default::default()
+            },
+        );
+        // v2 file: no migration that touches walls (only the <2 gate).
+        assert!(state.version >= 2);
+        assert!(state.profiles["cf.example"].needs_tier2);
+        assert!(state.profiles["cf.example"].egress_class.is_none());
+    }
+
+    /// B1: Warm cookies learned on `direct` are never injected when
+    /// the live lane is `proxy` (and vice versa).
+    #[test]
+    fn warm_cookies_never_cross_egress_classes() {
+        let mut state = GhostState::default();
+        let n = now();
+        state.profiles.insert(
+            "bank.example".into(),
+            DomainProfile {
+                needs_tier2: true,
+                replay_ok: true,
+                last_solved: n,
+                cookies: vec![CookieRecord {
+                    name: "cf_clearance".into(),
+                    value: "tok".into(),
+                    domain: "bank.example".into(),
+                    path: "/".into(),
+                    expires_at: Some(n + 3600),
+                    secure: true,
+                    http_only: true,
+                    same_site: "None".into(),
+                }],
+                egress_class: Some("direct".into()),
+                ..Default::default()
+            },
+        );
+        match state.route_for_class("bank.example", "direct") {
+            RouteDecision::Warm(c) => assert_eq!(c.len(), 1, "same class must warm"),
+            other => panic!("expected Warm on matching class, got {other:?}"),
+        }
+        match state.route_for_class("bank.example", "proxy") {
+            RouteDecision::Warm(_) => {
+                panic!("cross-class warm is a cookie/IP link; must not serve")
+            }
+            RouteDecision::SkipToSolve | RouteDecision::RecheckCold | RouteDecision::Cold => {}
+            other => panic!("unexpected cross-class route: {other:?}"),
+        }
     }
 
     #[test]
