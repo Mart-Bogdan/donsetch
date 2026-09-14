@@ -298,6 +298,9 @@ pub struct SearchOutcome {
     /// C5: byte-derived featured snippet / instant / knowledge.
     /// Never merged into `results`. None when absent.
     pub instant: Option<instant::InstantAnswer>,
+    /// Post-fan-out phase timings for the search-debug meta:
+    /// (stage, ms). Empty for the cache/BYOK paths.
+    pub stage_ms: Vec<(&'static str, u128)>,
 }
 
 impl Searcher {
@@ -392,6 +395,7 @@ impl Searcher {
             // BYOK providers do not surface a byte-derived SERP
             // instant layer; keep the slot honest.
             instant: None,
+            stage_ms: Vec::new(),
         })
     }
 
@@ -590,6 +594,7 @@ impl Searcher {
                         // Instant is not cached: a stale featured
                         // snippet presented as fresh would lie.
                         instant: None,
+                        stage_ms: Vec::new(),
                     });
                 }
             }
@@ -640,6 +645,7 @@ impl Searcher {
                 // Instant is not cached: a stale featured
                 // snippet presented as fresh would lie.
                 instant: None,
+                stage_ms: Vec::new(),
             });
         }
 
@@ -1050,30 +1056,41 @@ impl Searcher {
         // pages. Richer than SERP snippets, filters dead links.
         // The genius feature: results carry the page's own title
         // and description, not the SERP's truncated version.
+        let enrich_t = std::time::Instant::now();
         self.enrich_results(&mut results).await;
+        let enrich_ms = enrich_t.elapsed().as_millis();
 
         // ── site:/intitle:/filetype: post-merge enforcement:
         // engines don't strictly respect operators : some results
         // leak through. Filter them out post-merge so the agent
         // only sees what it asked for.
+        let filters_t = std::time::Instant::now();
         site_filter(query, &mut results);
         query::intitle_filter(query, &mut results);
         query::filetype_filter(query, &mut results);
+        let filters_ms = filters_t.elapsed().as_millis();
 
         // Post-enrichment top-up: the cross-encoder now sees the
         // real page titles/descriptions on the top slice, not the
         // SERP fragments. Bounded additive nudge, then re-sort.
         // DONSEEK_NO_TOPUP is the A/B kill switch for benching.
         #[cfg(feature = "rerank")]
-        if crate::config::cfg().search.rerank_topup {
-            let q = query.to_string();
-            let mut owned = std::mem::take(&mut results);
-            results = run_blocking_ranking(move || {
-                crate::search::rerank::topup(&q, &mut owned, 8);
-                owned
-            })
-            .await?;
-        }
+        let topup_ms: u128 = {
+            if crate::config::cfg().search.rerank_topup {
+                let t = std::time::Instant::now();
+                let q = query.to_string();
+                let mut owned = std::mem::take(&mut results);
+                let r = run_blocking_ranking(move || {
+                    crate::search::rerank::topup(&q, &mut owned, 8);
+                    owned
+                });
+                let ms = t.elapsed().as_millis();
+                results = r.await?;
+                ms
+            } else {
+                0
+            }
+        };
         // Poisoning guard: a merge built while engines
         // were down must NOT persist for 30 minutes :
         // degraded-period results expire with the moment.
@@ -1130,6 +1147,12 @@ impl Searcher {
             save_health_disk_if_dirty(self, &t, &ti, &f);
         }
 
+        let stages = vec![
+            ("enrich", enrich_ms),
+            ("filters", filters_ms),
+            ("topup", topup_ms),
+        ];
+
         Ok(SearchOutcome {
             results: results.into_iter().take(max_results).collect(),
             weak,
@@ -1140,6 +1163,7 @@ impl Searcher {
             provider: None,
             reranked: crate::search::rerank::loaded(),
             instant,
+            stage_ms: stages,
         })
     }
 
@@ -1459,6 +1483,7 @@ mod tests {
             provider: Some(provider.to_string()),
             reranked: false,
             instant: None,
+            stage_ms: Vec::new(),
         }
     }
 
@@ -2062,6 +2087,7 @@ mod tests {
             provider: None,
             reranked: false,
             instant: None,
+            stage_ms: Vec::new(),
         }
     }
 

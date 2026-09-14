@@ -289,6 +289,7 @@ impl ByokSearcher {
                         // Providers do not expose a byte-derived
                         // SERP instant layer.
                         instant: None,
+                        stage_ms: Vec::new(),
                     });
                 }
                 Err(key_error) => {

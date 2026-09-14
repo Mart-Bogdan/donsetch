@@ -337,6 +337,20 @@ pub fn render_meta(out: &SearchOutcome) -> Value {
         "weak": out.weak,
         "cached": out.cached,
         "elapsed_ms": out.elapsed.as_millis() as u64,
+        "stage_ms": if out.stage_ms.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::Object(out
+                .stage_ms
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.to_string(),
+                        serde_json::json!(*v as u64),
+                    )
+                })
+                .collect::<serde_json::Map<String, serde_json::Value>>())
+        },
         "provider": out.provider,
         "rerank": if out.reranked { "on" } else { "off (RRF+BM25 fallback)" },
         "instant": instant,

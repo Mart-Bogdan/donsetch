@@ -198,7 +198,22 @@ impl Searcher {
             }));
         }
 
-        let enriched = futures_util::future::join_all(futures).await;
+        // Batch deadline: the enrich pass never holds the SERP
+        // hostage past its budget. Pages that finish inside the
+        // window enrich and score; stragglers are dropped and the
+        // SERP snippet stays as the fallback. Without this one slow
+        // top page inflated every cold search by up to its whole
+        // 4s per-item timeout while every other result was ready.
+        const ENRICH_BATCH_DEADLINE_MS: u64 = 700;
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(ENRICH_BATCH_DEADLINE_MS);
+        let mut set: futures_util::stream::FuturesUnordered<_> = futures.into_iter().collect();
+        let mut enriched: Vec<(usize, Option<String>, Option<String>, QualityObs)> = Vec::new();
+        while let Ok(Some(out)) =
+            tokio::time::timeout_at(deadline, futures_util::StreamExt::next(&mut set)).await
+        {
+            enriched.push(out);
+        }
 
         for (i, title, desc, obs) in enriched {
             if i >= results.len() {

@@ -695,6 +695,7 @@ mod search_output_contract_tests {
             provider: None,
             reranked: true,
             instant: None,
+            stage_ms: Vec::new(),
         };
         let state = search_model_meta(&output, &["S1".into()]);
         assert_eq!(state["results"][0]["rank"], 1);

@@ -534,6 +534,7 @@ fn machine_meta(result: &Value, sc: &Value) -> Value {
         "instant",
         "results",
         "engines",
+        "stage_ms",
     ];
     let debug = result
         .get("_meta")
