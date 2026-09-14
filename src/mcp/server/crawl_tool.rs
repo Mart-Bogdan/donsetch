@@ -358,6 +358,12 @@ pub(super) fn render_crawl_dataset(
         // so downstream parsers can fail closed.
         "dataset_version": 1,
         "rows": rows.len(),
+        // Summed row chars so CLI/MCP summaries report real volume in
+        // dataset mode (the JSON mode's pages[] is absent here).
+        "chars": rows
+            .iter()
+            .filter_map(|r| r.get("chars").and_then(|c| c.as_u64()))
+            .sum::<u64>(),
         "complete": matches!(result.stop, crate::crawl::StopReason::FrontierEmpty),
         "stop": format!("{:?}", result.stop),
     });

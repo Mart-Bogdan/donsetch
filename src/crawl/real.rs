@@ -87,8 +87,19 @@ pub fn build(fetcher: Arc<Fetcher>, pool: Arc<EgressPool>) -> (Crawler, Arc<Gove
                 // donsetch process on the same host still needs a
                 // shared last-stamp. Best-effort, kill-switchable.
                 crate::crawl::host_pace::wait_and_stamp(&host).await;
+                // A recrawl exists to see what changed : serve the
+                // live response, never the revalidation cache (the
+                // cached body made every delta recrawl compare the
+                // previous crawl's own content and report zero
+                // changes forever).
                 match fetcher
-                    .fetch_via_jar_ref(&fetch_url, proxy.as_ref(), use_jar, referer.as_deref())
+                    .fetch_via_jar_opts(
+                        &fetch_url,
+                        proxy.as_ref(),
+                        use_jar,
+                        referer.as_deref(),
+                        true,
+                    )
                     .await
                 {
                     Ok(out) => {
