@@ -29,6 +29,19 @@ pub struct Relay {
     handle: Option<JoinHandle<()>>,
 }
 
+/// Per-relay upstream-failure memory: a host the lane keeps
+/// refusing (ACL: tiktokcdn-class hosts on a search-oriented
+/// lane) fails FAST after a few strikes instead of burning a full
+/// dial timeout on every browser request. That is what made the
+/// ghost-solve ladder take 40s on tiktok: every CDN request
+/// retried the refused dial.
+#[derive(Default)]
+struct StrikeCache {
+    strikes: std::collections::HashMap<String, u8>,
+}
+
+const STRIKE_LIMIT: u8 = 3;
+
 impl Relay {
     /// Bind 127.0.0.1:0 and start the accept loop. `None` when the
     /// listener cannot bind (port exhaustion?); the caller then
@@ -61,12 +74,14 @@ impl Drop for Relay {
 }
 
 async fn accept_loop(listener: TcpListener, proxy: Arc<crate::transport::proxy::Proxy>) {
+    let strikes = std::sync::Arc::new(std::sync::Mutex::new(StrikeCache::default()));
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
                 let proxy = Arc::clone(&proxy);
+                let strikes = std::sync::Arc::clone(&strikes);
                 tokio::spawn(async move {
-                    let _ = serve_socks5_client(stream, proxy).await;
+                    let _ = serve_socks5_client(stream, proxy, strikes).await;
                 });
             }
             Err(_) => return,
@@ -77,6 +92,7 @@ async fn accept_loop(listener: TcpListener, proxy: Arc<crate::transport::proxy::
 async fn serve_socks5_client(
     mut client: TcpStream,
     proxy: Arc<crate::transport::proxy::Proxy>,
+    strikes: std::sync::Arc<std::sync::Mutex<StrikeCache>>,
 ) -> std::io::Result<()> {
     let mut greeting = [0u8; 2];
     client.read_exact(&mut greeting).await?;
@@ -121,6 +137,22 @@ async fn serve_socks5_client(
     client.read_exact(&mut port_bytes).await?;
     let port = u16::from_be_bytes(port_bytes);
 
+    let host_key = format!("{host}:{port}");
+    let refused = {
+        let cache = strikes.lock().unwrap();
+        cache
+            .strikes
+            .get(&host_key)
+            .is_some_and(|n| *n >= STRIKE_LIMIT)
+    };
+    if refused {
+        // Refused fast: Chrome skips the asset, the page hydrates.
+        let _ = client
+            .write_all(&[5u8, 1u8, 0u8, 1u8, 0, 0, 0, 0, 0, 0])
+            .await;
+        return Ok(());
+    }
+
     match proxy.connect(&host, port).await {
         Ok(mut upstream) => {
             if client
@@ -138,6 +170,11 @@ async fn serve_socks5_client(
                 "[relay] upstream dial failed for {host}:{port} through {}: {e}",
                 proxy.host
             );
+            {
+                let mut cache = strikes.lock().unwrap();
+                let s = cache.strikes.entry(host_key).or_insert(0);
+                *s = s.saturating_add(1);
+            }
             let _ = client
                 .write_all(&[5u8, 1u8, 0u8, 1u8, 0, 0, 0, 0, 0, 0])
                 .await;
