@@ -1091,6 +1091,11 @@ impl Searcher {
                 0
             }
         };
+        // Without the rerank feature the stage is a no-op: report a
+        // flat zero so stage_ms stays schema-stable on all feature
+        // halves of the build matrix.
+        #[cfg(not(feature = "rerank"))]
+        let topup_ms: u128 = 0;
         // Poisoning guard: a merge built while engines
         // were down must NOT persist for 30 minutes :
         // degraded-period results expire with the moment.
