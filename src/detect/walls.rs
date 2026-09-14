@@ -493,6 +493,42 @@ fn classify_wall(
         }
         return Verdict::Blocked;
     }
+    // Reddit's current JS-challenge (2026): a nonce form that
+    // auto-submits itself on a page with essentially no prose.
+    // Nothing but a browser passes it, so HTTP must not score it
+    // as content (live case: the whole r/technology shell).
+    if text.len() < 16_384 && text.contains("document.forms[0].submit()") && text.contains("nonce")
+    {
+        return Verdict::Challenge(Vendor::Generic);
+    }
+    // Amazon's shopping gate: "click the button below to
+    // continue shopping" plus nothing else is a bot wall, not
+    // a product page.
+    if text.len() < 16_384 && text.contains("click the button below to continue shopping") {
+        return Verdict::Challenge(Vendor::Generic);
+    }
+    // Instagram's logged-out shell: a sign-up gate. The profile
+    // content is behind login BY DESIGN, so the verdict is Login,
+    // never Challenge (there is nothing to solve). Escalating to
+    // the ghost just renders the same wall and fails with "no
+    // real content was extractable" (live case: /cristiano/).
+    if text.len() < 12_000
+        && (text.contains("log in to see photos and videos from friends")
+            || text.contains("sign up to see photos and videos"))
+    {
+        return Verdict::AuthWall;
+    }
+    // Spinner shells: a page whose entire visible text is a
+    // "please wait"-style spinner is a challenge shell, never
+    // real content. Judge the VISIBLE text, not raw length:
+    // SPA hosts keep megabytes of JS around a two-line shell
+    // (live case: tiktok's 12-token "Please wait..." fetch).
+    if text.len() < 32_768
+        && visible_text_count(text.as_bytes()) < 120
+        && (text.contains("please wait") || text.contains("one moment"))
+    {
+        return Verdict::Challenge(Vendor::Generic);
+    }
     // Reddit-style interstitials (often served as 200).
     if text.contains("prove your humanity")
         || text.contains("not for bots")
@@ -939,4 +975,53 @@ mod tests {
         let v = detect(403, &[("server".into(), "cloudflare".into())], &body);
         assert!(matches!(v, Verdict::Challenge(_)), "got {v:?}");
     }
+}
+
+// Reddit's 2026 JS-challenge: a nonce form auto-submitting
+// itself with essentially no prose (live case: the whole
+// r/technology shell scored ContentOk at tier 1).
+#[test]
+fn reddit_nonce_form_shell_is_challenge() {
+    let body = "<!doctype html><html><head><title>Reddit</title></head><body><form><input type=hidden name=nonce value=a4e5c47fd8fd981e></form><script>document.forms[0].submit()</script></body></html>";
+    assert!(matches!(
+        detect(200, &[], body.as_bytes()),
+        Verdict::Challenge(Vendor::Generic)
+    ));
+}
+
+// Amazon's shopping-gate interstitial is a challenge so the
+// ladder can solve it (or fail honestly); it must not ship as
+// a successful "product page".
+#[test]
+fn amazon_shopping_gate_is_challenge() {
+    let body = "<html><body><h4>Click the button below to continue shopping</h4><button>Continue shopping</button></body></html>";
+    assert!(matches!(
+        detect(200, &[], body.as_bytes()),
+        Verdict::Challenge(Vendor::Generic)
+    ));
+}
+
+// A spinner shell whose entire visible text is a loading
+// prompt is a challenge shell, never content (live case:
+// tiktok's 12-token "Please wait..." ok fetch).
+#[test]
+fn spinner_shell_is_challenge_not_content() {
+    let body = "<html><head><style>.s{opacity:0}</style></head><body><div>Please wait...</div></body></html>";
+    assert!(matches!(
+        detect(200, &[], body.as_bytes()),
+        Verdict::Challenge(Vendor::Generic)
+    ));
+}
+
+// Instagram's logged-out shell is a login wall BY DESIGN:
+// AuthWall, not Challenge (nothing to solve), so the fetch
+// stops honestly instead of burning a browser render on the
+// same gate (live case: /cristiano/ ended "no real content").
+#[test]
+fn instagram_logged_out_shell_is_auth_wall() {
+    let body = "<html><body><h2>Log in to see photos and videos from friends and accounts you follow.</h2><a>Log in</a><a>Sign up</a></body></html>";
+    assert!(matches!(
+        detect(200, &[], body.as_bytes()),
+        Verdict::AuthWall
+    ));
 }

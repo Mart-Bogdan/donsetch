@@ -1151,14 +1151,40 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
         })
         .unwrap_or(is_pdf_url);
     // Small 404 check: a small thin page is likely a 404/error.
-    // But a small PDF is still a PDF : DonSheet handles it.
-    let is_small_404 =
-        page_size > 0 && page_size < 5_000 && still_thin && !challenge && !is_pdf_content;
+    // But a small PDF is still a PDF : DonSheet handles it. And
+    // it is only a 404 when the STATUS says so: a 2xx that comes
+    // back with no content is a wall or a spinner shell, not a
+    // 404 (live case: tiktok's "Please wait..." 12-token fetch
+    // served as ok). Never escalate on a real error status.
+    let status_2xx = out
+        .as_ref()
+        .map(|o| (200..300).contains(&o.status))
+        .unwrap_or(false);
+    let is_small_404 = page_size > 0
+        && page_size < 5_000
+        && still_thin
+        && !challenge
+        && !is_pdf_content
+        && !status_2xx;
+    // Framework-junk shells (React server dumps leak identifiers
+    // as DOM text nodes): the extracted "content" is things like
+    // `# is_latency_sensitive_broadcast`, `FDSTooltipDef`,
+    // `[["low","normal"]]` with no prose (live case: facebook's
+    // tier-1 fetch served that as a successful result). Short,
+    // sentence-free, identifier-dominated text = a shell, not
+    // content: escalate instead of serving garbage.
+    let shell_text = status_2xx
+        && !is_pdf_content
+        && final_ex
+            .as_ref()
+            .map(|e| looks_like_shell_text(&e.markdown))
+            .unwrap_or(false);
     let need_ghost = !is_pdf_content
         && !adapter_host // adapter endpoints (reddit .json, registry APIs) are plain GETs
         && ((challenge && tier != "1" && !is_small_404)
             || skip_tier1
-            || (still_thin && tier == "auto" && !is_small_404));
+            || (still_thin && tier == "auto" && !is_small_404)
+            || (shell_text && tier == "auto"));
 
     if need_ghost {
         // Render-cache shortcut: a previously recovered DOM.
@@ -1201,17 +1227,41 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
             }
         }
 
-        match ghost_escalate(
-            daemon,
-            &url,
-            &host,
-            &opts,
-            challenge || shell_warm || skip_tier1,
-            shot,
-            &mut trace,
-        )
-        .await
-        {
+        // Chrome renders ITS OWN error page (ERR_SOCKS_CONNECTION_
+        // FAILED etc.) when the egress lane is dead: the ghost stage
+        // fails with kind "walled" and a stable tiny-text DOM. One
+        // direct retry (no lane at all) usually just works; ride it
+        // before giving up. One-shot per fetch, never sticky.
+        let mut ghost_direct_tried = false;
+        let ghost_result = loop {
+            crate::ghost::note_last_ghost_chrome_error(false);
+            match ghost_escalate(
+                daemon,
+                &url,
+                &host,
+                &opts,
+                challenge || shell_warm || skip_tier1,
+                shot,
+                &mut trace,
+            )
+            .await
+            {
+                Ok(done) => break Ok(done),
+                Err((msg, kind)) => {
+                    if !ghost_direct_tried
+                        && kind == "walled"
+                        && crate::ghost::last_ghost_chrome_error()
+                    {
+                        crate::ghost::set_ghost_direct(true);
+                        ghost_direct_tried = true;
+                        continue;
+                    }
+                    break Err((msg, kind));
+                }
+            }
+        };
+        crate::ghost::set_ghost_direct(false);
+        match ghost_result {
             Ok((e, tier2, status, furl)) => {
                 final_ex = Some(e);
                 final_tier = tier2;
@@ -1949,6 +1999,13 @@ pub(super) async fn ghost_escalate(
         ));
     }
     daemon.state.lock().await.record_wall_failed(host);
+    // Chrome's own network-error page (a dead/broken egress lane
+    // renders as a stable tiny-text DOM): note it so the caller
+    // can retry the whole ghost stage ONCE with no proxy lane
+    // (direct), which usually just works instead of lying.
+    if crate::ghost::is_chrome_error_html(&page.html) {
+        crate::ghost::note_last_ghost_chrome_error(true);
+    }
     Err((
         format!(
             "blocked at {url} : tier 2 rendered a {}KB DOM but no real content was extractable. Use an Agent browser to browse sites like these",
@@ -1962,6 +2019,46 @@ pub(super) async fn ghost_escalate(
 /// flow computes its own is_pdf_url). Covers both the .pdf
 /// suffix convention and the /pdf/ path convention (arXiv:
 /// arxiv.org/pdf/1706.03762 serves a PDF with no extension).
+/// Short, sentence-free, identifier-dominated extraction = a
+/// framework shell (React server dumps leak identifiers as DOM
+/// text nodes). Real prose has sentences.
+fn looks_like_shell_text(markdown: &str) -> bool {
+    if markdown.len() > 1500 {
+        return false;
+    }
+    let sentences = markdown
+        .split(['.', '!', '?', '\n'])
+        .filter(|s| s.split(' ').filter(|w| w.chars().count() > 3).count() >= 6)
+        .count();
+    if sentences >= 2 {
+        return false;
+    }
+    let tokens: Vec<&str> = markdown.split_whitespace().collect();
+    if tokens.len() < 8 {
+        return true;
+    }
+    let ident = tokens
+        .iter()
+        .filter(|t| {
+            // A prose word = plain letters. Everything else (version
+            // strings, paths, bracket arrays, snake_case, camelCase,
+            // scheme:// tokens) is framework residue.
+            let t = t.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+            !t.is_empty()
+                && (t.contains('_')
+                    || t.contains('/')
+                    || t.contains('[')
+                    || t.contains(':')
+                    || (t.chars().any(|c| c.is_ascii_digit())
+                        && t.chars().any(|c| !c.is_alphanumeric()))
+                    || t.char_indices().skip(1).any(|(i, ch)| {
+                        ch.is_uppercase() && t[..i].chars().last().is_some_and(|c| c.is_lowercase())
+                    }))
+        })
+        .count();
+    ident * 100 / tokens.len() >= 40
+}
+
 pub(super) fn is_pdf_url_like(url: &str) -> bool {
     let path = url.split('?').next().unwrap_or(url).to_lowercase();
     if path.ends_with(".pdf") {
@@ -3325,6 +3422,36 @@ mod fetch_output_contract_tests {
                 "https://example.com/page"
             )
             .contains("# Actual first section")
+        );
+    }
+
+    // Framework-junk shells must never ship as successful content:
+    // the classifier that gates the tier-2 escalation (live case:
+    // facebook's tier-1 markdown was React internals).
+    #[test]
+    fn shell_text_classifier_rejects_react_dumps_and_flags_spinners() {
+        let fb = "# is_latency_sensitive_broadcast\n# Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36\nFDSTooltipDef\n\
+[[\"low\",\"normal\"]]\n__isReceiptEnd\nfdi_dispatch\npage_logging_framework";
+        assert!(
+            super::looks_like_shell_text(fb),
+            "identifier-dominated junk must classify as a shell"
+        );
+        assert!(
+            super::looks_like_shell_text("Please wait..."),
+            "a spinner fragment must classify as a shell"
+        );
+        let real = "Cristiano Ronaldo is a Portuguese footballer who has won the \
+Champions League five times. He remains the most followed athlete \
+across every major social platform today.";
+        assert!(
+            !super::looks_like_shell_text(real),
+            "real prose must never classify as a shell"
+        );
+        let hn = "1. Rust 2.0 released (crates.io)\n2. Show HN: my parser (github.com)\n";
+        assert!(
+            !super::looks_like_shell_text(hn),
+            "short legit listings must not classify as a shell"
         );
     }
 }

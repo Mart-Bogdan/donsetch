@@ -21,6 +21,7 @@ pub mod manager;
 pub mod ops;
 pub mod probe;
 pub mod proc;
+pub mod relay;
 pub mod xvfb;
 
 use std::path::PathBuf;
@@ -65,6 +66,44 @@ pub const WINLOCK_STALE_AFTER: std::time::Duration = std::time::Duration::from_s
 #[cfg(windows)]
 pub const WINLOCK_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// Set when the LAST ghost render returned Chrome's own network
+/// error page (a dead/broken egress lane renders as a stable,
+/// tiny-text DOM extraction cannot use: the old path scored it
+/// "rendered a 180KB DOM, no content" and failed the fetch).
+/// The fetch escalation reads it for one direct retry; per
+/// attempt, never sticky.
+static LAST_GHOST_CHROME_ERROR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Launch override: skip proxy lanes entirely (direct). Set for
+/// one ghost escalation retry when the previous render hit a
+/// Chrome error page.
+static GHOST_DIRECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Chrome's own error pages (ERR_* rendered as HTML). A content
+/// page never contains these strings; an error page never
+/// contains real content.
+pub fn is_chrome_error_html(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    lower.contains("err_socks_connection_failed")
+        || lower.contains("err_proxy_connection_failed")
+        || lower.contains("err_tunnel_connection_failed")
+        || lower.contains("this site can't be reached")
+        || lower.contains("the proxy server is refusing connections")
+}
+
+pub fn note_last_ghost_chrome_error(on: bool) {
+    LAST_GHOST_CHROME_ERROR.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn last_ghost_chrome_error() -> bool {
+    LAST_GHOST_CHROME_ERROR.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn set_ghost_direct(on: bool) {
+    GHOST_DIRECT.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub struct Ghost {
     child: Child,
     proc: proc::Proc,
@@ -104,6 +143,11 @@ pub struct Ghost {
     /// Persona-coherent wire identity (v4 E2): viewport + locale used
     /// for launch args, CDP languages, and device metrics.
     wire: GhostWire,
+    /// Local credential relay when the egress lane requires auth
+    /// (Chrome cannot authenticate proxies itself). Owns the
+    /// listener: dropped with the Ghost.
+    #[allow(dead_code)] // held for its lifetime; Drop aborts the relay
+    relay: Option<relay::Relay>,
 }
 
 /// Per-persona ghost wire identity (v4 E2). Defaults are the old
@@ -728,21 +772,45 @@ impl Ghost {
         // ── HTTP proxy ──
         // Prefer a sticky lane from the shared egress pool (v4 A2)
         // so the browser exit matches the rest of the fabric. Fall
-        // back to env/slot. Chrome handles proxy auth via its own
-        // dialog (which we never see in headless/off-screen mode),
-        // so for authenticated proxies the user may need a
-        // proxy-auth extension. For unauthenticated proxies this
-        // just works.
-        let pool_proxy = crate::search::egress::global().and_then(|pool| {
-            if !pool.has_proxies() || !crate::config::cfg().proxy.fetch_rotate {
-                return None;
-            }
-            pool.pick_fetch("ghost.local", true).and_then(|e| e.proxy)
-        });
+        // back to env/slot. Chrome CANNOT authenticate a proxy
+        // itself: --proxy-server carries no credentials and no
+        // dialog we can drive headless, so an authenticated lane
+        // made Chrome render its own ERR_SOCKS_CONNECTION_FAILED
+        // error page and the whole tier-2 attempt died. Authed
+        // lanes now ride a local relay: Chrome speaks plain socks5
+        // to 127.0.0.1, the relay performs the upstream handshake
+        // with the lane's own credentials (exactly what the tier-1
+        // client does) and pipes bytes.
+        let pool_proxy = if GHOST_DIRECT.load(std::sync::atomic::Ordering::SeqCst) {
+            // Direct retry after a Chrome error page: no lanes at
+            // all, direct is the only chance left.
+            None
+        } else {
+            crate::search::egress::global().and_then(|pool| {
+                if !pool.has_proxies() || !crate::config::cfg().proxy.fetch_rotate {
+                    return None;
+                }
+                pool.pick_fetch("ghost.local", true).and_then(|e| e.proxy)
+            })
+        };
+        let mut relay: Option<relay::Relay> = None;
         if let Some(p) =
             pool_proxy.or_else(|| crate::transport::proxy::from_env_for("https://ghost.local/"))
         {
-            chrome_args.push(format!("--proxy-server={}", p.chrome_proxy_arg()));
+            let authed = !p.user.is_empty() || !p.pass.is_empty();
+            let arg = if authed {
+                match relay::Relay::spawn(std::sync::Arc::new(p.clone())).await {
+                    Some(r) => {
+                        let arg = r.chrome_arg();
+                        relay = Some(r);
+                        arg
+                    }
+                    None => p.chrome_proxy_arg(),
+                }
+            } else {
+                p.chrome_proxy_arg()
+            };
+            chrome_args.push(arg);
         }
         // ── Stealth mode selection ──
         //
@@ -799,7 +867,16 @@ impl Ghost {
         // Own process group (Unix) / Job Object (Windows):
         // freeze/thaw/kill the whole browser tree.
         proc::Proc::prepare_cmd(&mut cmd);
-        cmd.stdout(Stdio::null()).stderr(Stdio::piped());
+        // stdin MUST be null: a child inheriting the parent's
+        // controlling terminal gets SIGTTIN the moment it reads
+        // stdin (a daemon running attached to a tty), and the whole
+        // browser tree freezes in state T = the DevTools handshake
+        // never completes (live case: the daemon's chromiums sat in
+        // Tl for hours; every tier-2 attempt died with "devtools ws
+        // timeout").
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
         // No orphans even if donsetch dies hard. Linux/Android:
         // prctl(PR_SET_PDEATHSIG). macOS has no prctl; Windows
         // uses the Job Object's KILL_ON_JOB_CLOSE.
@@ -1023,6 +1100,7 @@ impl Ghost {
             #[cfg(windows)]
             winlock_heartbeat,
             wire: wire.clone(),
+            relay,
         })
     }
 

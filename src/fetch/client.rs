@@ -43,6 +43,9 @@ pub struct FetchOutcome {
     pub elapsed: Duration,
 }
 
+/// Per-request identity knobs. Copy: the redirect driver hands
+/// the same identity to every hop.
+#[derive(Clone, Copy)]
 struct RequestIdentity<'a> {
     class: RequestClass,
     legacy_user_agent: Option<&'a str>,
@@ -558,12 +561,67 @@ impl Fetcher {
 
     /// Navigation fetch whose Accept-Language is persona-coherent
     /// (v4 E2). The rest of the header set stays profile-true.
+    /// Bounded redirect driver shared by the single-identity
+    /// wrappers (the tier-1 persona fetch today). fetch_via_jar_opts
+    /// has its own loop; these wrappers had none, so a plain 301
+    /// came back as the final response and the whole fetch failed
+    /// (live case: twitter.com -> x.com = "blocked: returned HTTP
+    /// 301"). Mirrors that loop's semantics: same SSRF guard, same
+    /// hop cap, per-hop DNS gate (fetch_once_via_identity re-gates
+    /// every URL), conditional headers dropped after the first hop.
+    async fn fetch_identity_following(
+        &self,
+        url_str: &str,
+        conditional: &[(String, String)],
+        proxy: Option<&proxy::Proxy>,
+        use_jar: bool,
+        referer: Option<&str>,
+        identity: RequestIdentity<'_>,
+    ) -> Result<FetchOutcome, FetchError> {
+        let mut cur: url::Url =
+            url::Url::parse(url_str).map_err(|e| FetchError::Http(format!("bad url: {e}")))?;
+        let mut conditional = conditional.to_vec();
+        let mut hops = 0u8;
+        loop {
+            let out = self
+                .fetch_once_via_identity(
+                    cur.as_str(),
+                    &conditional,
+                    proxy,
+                    use_jar,
+                    referer,
+                    identity,
+                )
+                .await?;
+            if !(300..400).contains(&out.status) {
+                return Ok(out);
+            }
+            let Some(loc) = header_value(&out.headers, "location") else {
+                return Ok(out);
+            };
+            if hops >= MAX_REDIRECTS {
+                return Ok(out);
+            }
+            match crate::fetch::guards::validate_redirect_url(&cur, &loc) {
+                Ok(next) => {
+                    hops += 1;
+                    conditional.clear();
+                    cur = next;
+                }
+                Err(_) => return Ok(out),
+            }
+        }
+    }
+
+    /// Tier-1 navigation-identity fetch (the daemon's Chrome-class
+    /// hop). Follows redirects (bounded); cross-host hops are
+    /// re-gated per hop.
     pub async fn fetch_persona(
         &self,
         url_str: &str,
         accept_language: Option<&str>,
     ) -> Result<FetchOutcome, FetchError> {
-        self.fetch_once_via_identity(
+        self.fetch_identity_following(
             url_str,
             &[],
             None,
