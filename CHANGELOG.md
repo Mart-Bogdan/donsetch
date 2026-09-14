@@ -5,9 +5,52 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.1.0] - 2026-09-14
 
-Nothing yet.
+The live-verification wave: every subsystem re-tested against the
+real binary on real sites, and the bugs the unit suites could not
+see are dead.
+
+### Fixed
+- Delta recrawls see the live page. The crawl fetch rode the
+  revalidation cache, so a fresh-window entry was served back
+  without dialing the origin and every recrawl compared the last
+  crawl's own body, reporting zero changes forever. The crawl fetch
+  path now bypasses the cache. Covered by an e2e test: the plain
+  path serves the stale body with zero dials, the crawl path dials
+  and sees the change.
+- A SOCKS5 relay that refuses a host remembers the refusal and
+  fails fast. Repeat-offender hosts ate a dial timeout per request
+  (the tiktok ladder went 40s to 21s).
+- Tier 1 follows redirects through the identity wrappers. The
+  persona/class/UA lanes had no redirect loop and reported
+  "blocked: returned HTTP 301" on sites that simply 301 to their
+  real URL. One shared bounded redirect driver now.
+- Chrome runs with stdin closed: a suspended SIGTTIN page could
+  hang the ghost render.
+- Wall detection classifies 200-class walls (the reddit nonce form,
+  the amazon gate, "please wait" interstitials, the instagram
+  AuthWall). A challenge page that arrives with HTTP 200 is not
+  content.
+- The last-resort DOM fallback is trusted: header/footer/nav/aside
+  blocks are skipped, ghost text is accepted at 40+ chars
+  non-login-only, and a final shell gate sits in front of the tool
+  result. Facebook now gets the honest "the site renders an app
+  shell without real content" instead of a success-looking blob.
+- The search enrich pass is bounded. One slow top page could stall
+  every cold search (2.0 to 4.4s observed). The enrich batch now
+  runs under a 700ms deadline; stragglers drop to the SERP snippet.
+  Per-stage timings (enrich/filters/topup) ride the search meta so
+  a cold-path regression names its phase. Cold search is steady at
+  2.0 to 2.3s.
+- The no-rerank build compiles again: the rerank-gated topup_ms
+  binding was consumed unconditionally, which killed the fuzz smoke
+  and windows jobs with E0425.
+- Stealth baseline re-captured for the current chromium 151.0.x:
+  the client-hello extension ordering moved; user agent and every
+  behavioral layer are unchanged.
+- Dataset crawl stderr summaries report real page and char counts
+  instead of "0 pages" while rows streamed on stdout.
 
 ## [4.0.0] - 2026-09-13
 
