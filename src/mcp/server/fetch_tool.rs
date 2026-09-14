@@ -1399,6 +1399,26 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
         );
     };
 
+    // Final shell gate: a framework dump (React server renders)
+    // must never ship as successful content regardless of the tier
+    // that produced it (live case: facebook's solve returned React
+    // internals as markdown with a clean verdict). Honest fail
+    // with the repair hint instead of garbage "success".
+    if looks_like_shell_text(&ex.markdown) {
+        return tool_error_structured(
+            format!(
+                "blocked at {url} : the site renders an app shell without real content for non-interactive clients"
+            ),
+            "permanent",
+            Some(json!({
+                "url": url,
+                "verdict": "Challenge(Generic)",
+                "next_action": "use an agent browser to browse sites like these; retry later",
+                "escalation": trace.value(),
+            })),
+        );
+    }
+
     // Small 404 page: if we didn't escalate to ghost (is_small_404)
     // and the extraction is still thin/empty, return "not found".
     // This is honest : the page exists (HTTP 200) but has no content.
@@ -1967,9 +1987,20 @@ pub(super) async fn ghost_escalate(
         let max_chars = opts.max_chars.unwrap_or(16_000).max(200);
         if let Some(fb) =
             crate::extract::fallback::text_fallback(&page.html, &meta, url, opts, max_chars)
-            && !fb.thin
         {
-            return Ok((fb, "ghost-text", 200, url.to_string()));
+            // The fallback is the LAST resort. A real page render
+            // whose useful text is short must still succeed (live
+            // case: instagram's profile card = 279 collectible
+            // chars, all of it the useful content; the old gate
+            // failed the whole fetch because the 800-char thin bar
+            // is tuned for articles). Only a login-only shell or a
+            // sub-sentence fragment stays a fail.
+            let login_only = fb.markdown.len() < 60
+                && (fb.markdown.to_ascii_lowercase().contains("log in")
+                    || fb.markdown.to_ascii_lowercase().contains("sign up"));
+            if !fb.thin || (fb.markdown.len() >= 40 && !login_only) {
+                return Ok((fb, "ghost-text", 200, url.to_string()));
+            }
         }
     }
 
@@ -2035,7 +2066,11 @@ fn looks_like_shell_text(markdown: &str) -> bool {
     }
     let tokens: Vec<&str> = markdown.split_whitespace().collect();
     if tokens.len() < 8 {
-        return true;
+        // A tiny fragment is a shell only when it is a spinner
+        // prompt; a short real profile card ("cristiano / 679M
+        // followers") must not be killed by bare smallness.
+        let lower = markdown.to_ascii_lowercase();
+        return lower.contains("please wait") || lower.contains("one moment");
     }
     let ident = tokens
         .iter()
