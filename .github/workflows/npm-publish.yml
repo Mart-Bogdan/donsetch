@@ -25,6 +25,10 @@ permissions:
 on:
   release:
     types: [released]
+  # Manual run: proves the NPM_TOKEN secret and the guards without
+  # minting a release. Resolves the repo's latest release as the
+  # tag under test.
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -40,7 +44,13 @@ jobs:
 
       - name: Assert npm version matches the release tag
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG_VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          if [ -z "$TAG_VERSION" ]; then
+            TAG_VERSION=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name')
+            echo "manual run: testing against latest release $TAG_VERSION"
+          fi
         run: |
           TAGVER="${TAG_VERSION#v}"
           PKGVER=$(node -p "require('./npm/package.json').version")
