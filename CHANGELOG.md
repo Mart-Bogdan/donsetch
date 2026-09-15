@@ -5,6 +5,23 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Bare-`<br>` layouts keep their paragraph breaks on every path.
+  `loose_text` is the shared DOM-to-markdown site that tier 1, the
+  tier-2 ghost browser, the site adapters, the last-resort fallback,
+  and the focus/section excerpt renderers all funnel through, and it
+  used to trim the `<br>` line-break sentinel away: a page built as
+  bare text plus `<br>` tags (like the live-reported novel chapter
+  with the `<br />` + CR + `<br />` + CRLF sequence) collapsed to one
+  space-separated blob. The `<br>` now emits its sentinel in place
+  and the shared post-processing turns it into real newlines, so a
+  br/whitespace/br run yields a blank line between paragraphs,
+  matching browser rendering. Covered by fixtures for the exact
+  reported byte sequence, the plain `<br>` form, the single-br case,
+  and the downstream focus renderer.
+
 ## [4.1.0] - 2026-09-14
 
 The live-verification wave: every subsystem re-tested against the
