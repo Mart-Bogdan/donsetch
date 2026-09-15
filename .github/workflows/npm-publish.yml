@@ -47,11 +47,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG_VERSION: ${{ github.event.release.tag_name }}
         run: |
+          # Manual runs carry no release context: test against the
+          # repo's latest published release instead.
           if [ -z "$TAG_VERSION" ]; then
             TAG_VERSION=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name')
             echo "manual run: testing against latest release $TAG_VERSION"
           fi
-        run: |
           TAGVER="${TAG_VERSION#v}"
           PKGVER=$(node -p "require('./npm/package.json').version")
           echo "release tag: $TAGVER / npm/package.json: $PKGVER"
