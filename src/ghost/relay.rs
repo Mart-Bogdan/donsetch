@@ -52,10 +52,7 @@ impl StrikeCache {
 
     fn note_failure(&mut self, host_key: &str) {
         let now = std::time::Instant::now();
-        let (n, at) = self
-            .strikes
-            .entry(host_key.to_owned())
-            .or_insert((0, now));
+        let (n, at) = self.strikes.entry(host_key.to_owned()).or_insert((0, now));
         // A strike that already expired counts as healed: restart the
         // limit instead of inheriting the stale count, so a single
         // failure right after recovery cannot fast-reject again.
