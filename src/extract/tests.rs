@@ -2371,3 +2371,38 @@ fn br_single_line_break_and_downstream() {
         r.markdown
     );
 }
+
+/// Issue #227 class, fallback path: the last-resort walker used to
+/// flush a paragraph at EVERY br (splitting prose at every line
+/// break) and add a space after each br's newline. Now one br = a
+/// line break inside the paragraph, two in a row = the paragraph
+/// break, matching the main converter and browser rendering.
+#[test]
+fn fallback_br_line_and_paragraph_breaks() {
+    let long = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua ut enim ad minim veniam quis nostrud exercitation ullamco laboris nisi ut aliquip";
+    let html = format!(
+        "<html><body><div>{long}<br>{long} beta</div><div>{long} one<br><br>{long} two</div></body></html>",
+    );
+    let meta = metadata::metadata(&Html::parse_fragment("<div></div>"));
+    let r = fallback::text_fallback(
+        &html,
+        &meta,
+        "https://x.invalid",
+        &Default::default(),
+        10_000,
+    )
+    .expect("fallback must extract");
+    let m = &r.markdown;
+    assert!(
+        m.contains("aliquip\nlorem"),
+        "single br = one newline, got: {m:?}"
+    );
+    assert!(
+        m.contains("one\n\nlorem"),
+        "br/blank/br = paragraph break, got: {m:?}"
+    );
+    assert!(
+        !m.contains("\n "),
+        "no leading space after any br newline, got: {m:?}"
+    );
+}
