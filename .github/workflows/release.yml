@@ -382,6 +382,28 @@ jobs:
           print(f"RELEASE_BODY.md: {len(section.splitlines())} lines from [{tag}]")
           EOF
 
+      # Release gate: never mint a draft off a red commit. The tag
+      # points at the master head that was pushed seconds before it,
+      # so the CI run for this exact SHA is already in flight. Poll
+      # for its conclusion (bounded ~40 min); a red or missing CI
+      # blocks the release instead of shipping unverified assets.
+      - name: Wait for CI on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          conclusion=""
+          for i in $(seq 1 60); do
+            conclusion=$(gh api "repos/${{ github.repository }}/actions/runs?head_sha=${{ github.sha }}" \
+              --jq '.workflow_runs[] | select(.name == "CI") | .conclusion' | head -1)
+            [ -n "$conclusion" ] && break
+            sleep 30
+          done
+          echo "CI conclusion for ${{ github.sha }}: ${conclusion:-none}"
+          if [ "$conclusion" != "success" ]; then
+            echo "release blocked: CI on this commit is ${conclusion:-missing}; fix and re-tag"
+            exit 1
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:

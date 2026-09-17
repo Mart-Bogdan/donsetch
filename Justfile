@@ -144,3 +144,40 @@ smoke: bin
 # 30-second fuzz burst on one target: just fuzz extract
 fuzz target:
     cd fuzz && cargo fuzz run {{target}} -s none -- -max_total_time=30
+
+# Release everything in one command. The CHANGELOG [version] section
+# must already exist; the recipe bumps both manifests + the lock,
+# validates, commits, pushes, and tags. The tag triggers CI + the
+# Release build in parallel; publish the draft when the watcher
+# reports green (gh run watch does it; nothing waits serially).
+ship version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "$(git rev-parse --show-toplevel)"
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "ship: dirty tree, commit or stash first"; exit 1
+    fi
+    grep -q "^## \[{{version}}\] - " CHANGELOG.md || {
+        echo "ship: CHANGELOG.md has no [{{version}}] section yet"; exit 1
+    }
+    sed -i 's/^version = ".*"/version = "{{version}}"/' Cargo.toml
+    sed -i 's/^  "version": ".*",/  "version": "{{version}}",/' npm/package.json
+    cargo update -p donsetch --precise {{version}} >/dev/null
+    grep -q 'version = "{{version}}"' Cargo.lock || {
+        echo "ship: Cargo.lock did not take the bump"; exit 1
+    }
+    git add Cargo.toml Cargo.lock npm/package.json CHANGELOG.md
+    git commit -q -m "chore(release): {{version}}"
+    git push -q origin master
+    git tag "v{{version}}"
+    git push -q origin "v{{version}}"
+    run=$(gh run list --workflow=Release --limit 1 | head -1 | awk '{print $1}')
+    echo "ship: v{{version}} pushed. Release build run $run is underway."
+    echo "      watcher: just watch $run"
+    echo "      publish when green: gh release edit v{{version}} --draft=false"
+
+# Follow one GitHub Actions run to completion in the foreground.
+# This replaces every sleep loop and polling loop: one command, it
+# exits with the run's verdict.
+watch run-id:
+    gh run watch {{run-id}} --exit-status --interval 30

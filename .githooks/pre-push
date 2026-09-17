@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Pre-push net: the cheap checks that catch the expensive sins.
+# Runs in seconds. If any check fails the push is refused.
+#   - formatted code (the #1 CI-kill: hand-formatted hunks)
+#   - no debug probes left in the tree (the [xprobe] class)
+#   - compiles on BOTH feature sets (the cfg-twin class: a binding
+#     gated behind a feature and consumed unconditionally only
+#     breaks the no-features build, exactly what killed two CI runs)
+#   - no internal docs staged (design/ status.md project.md never
+#     go public)
+#   - no version drift between the manifests (Cargo.toml vs
+#     npm/package.json must always agree)
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+staged=$(git diff --cached --name-only; git diff --name-only origin/master..HEAD 2>/dev/null || true)
+if echo "$staged" | rg -q '^(design/|status\.md|project\.md)'; then
+  echo "pre-push: internal docs staged (design/ status.md project.md are gitignored and private)"
+  exit 1
+fi
+if rg -n '\[[a-z]probe\]' src/ --glob '!tests/**' -q; then
+  echo "pre-push: debug probes left in src/: $(rg -n '\[[a-z]probe\]' src/ -l)"
+  exit 1
+fi
+cargo fmt --check >/dev/null
+cargo check --locked -q >/dev/null
+cargo check --locked -q --features ocr,rerank,http >/dev/null
+node --check npm/install.js >/dev/null
+node --check npm/bin/donsetch.js >/dev/null
+
+crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+npmpkg=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' npm/package.json)
+if [ "$crate" != "$npmpkg" ]; then
+  echo "pre-push: version drift: Cargo.toml=$crate npm/package.json=$npmpkg"
+  echo "run: just ship <version> to keep both in step"
+  exit 1
+fi
+echo "pre-push net ok (fmt, probes, dual-feature check, manifests in step)"
