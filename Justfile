@@ -72,7 +72,7 @@ ci-gates: bin
 
 # The tag-time gates (linux-x64 mirror of release.yml).
 gates:
-    {{courtesy}} CARGO_BUILD_JOBS={{bg}} cargo build --release -j {{bg}} --features ocr,rerank,http
+    CARGO_BUILD_JOBS={{bg}} {{courtesy}} cargo build --release -j {{bg}} --features ocr,rerank,http
     @sh scripts/gates.sh linux-x64 target/release
 
 fmt:
@@ -129,12 +129,12 @@ win-check-core: _win-check-prereqs
 # pinned via CLI: nextest 0.9.x ignores the config-level key, and an
 # unpinned run compiles the debug graph (the 110G/21G recidivism).
 test:
-    {{courtesy}} CARGO_BUILD_JOBS={{bg}} cargo nextest run -j {{bg}} --cargo-profile ci --features ocr,rerank,http
+    CARGO_BUILD_JOBS={{bg}} {{courtesy}} cargo nextest run -j {{bg}} --cargo-profile ci --features ocr,rerank,http
 
 # Scoped test run with the SAME pin: `just t crawl::frontier`
 # is the only local way to run a subset without growing debug.
 t expression:
-    {{courtesy}} CARGO_BUILD_JOBS={{bg}} cargo nextest run -j {{bg}} --cargo-profile ci --features ocr,rerank,http -E 'test({{expression}})' 
+    CARGO_BUILD_JOBS={{bg}} {{courtesy}} cargo nextest run -j {{bg}} --cargo-profile ci --features ocr,rerank,http -E 'test({{expression}})' 
 
 # The binary for live smoke runs (fast profile, real behavior).
 bin:
@@ -154,7 +154,7 @@ smoke: bin
 
 # 30-second fuzz burst on one target: just fuzz extract
 fuzz target:
-    cd fuzz && {{courtesy}} CARGO_BUILD_JOBS={{bg}} cargo fuzz run {{target}} -s none -- -max_total_time=30
+    cd fuzz && CARGO_BUILD_JOBS={{bg}} {{courtesy}} cargo fuzz run {{target}} -s none -- -max_total_time=30
 
 # Release everything in one command. The CHANGELOG [version] section
 # must already exist; the recipe bumps both manifests + the lock,
