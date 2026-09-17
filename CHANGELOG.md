@@ -5,6 +5,20 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- A server-controlled `Set-Cookie: ...; Expires=` header no longer reaches
+  unbounded i64 arithmetic in the cookie date parser: the year and clock
+  fields are gated per RFC 6265 5.1.1 before any math, so an absurd year
+  or time makes the attribute fail to parse and the cookie stays a session
+  cookie, instead of a panic under overflow-checks or a silently wrapped
+  garbage expiry in release. (mnaza, #230)
+- The last-resort raw-text fallback walker caps its recursion depth at
+  300, matching the two primary HTML walkers: a deeply nested, text-poor
+  page that reaches the fallback could overflow the tokio worker's
+  2 MiB stack and abort the process on one request. (mnaza, #231)
+
 ## [4.1.2] - 2026-09-17
 
 The install-hardening wave: smaller npm installs, recoverable blocked
