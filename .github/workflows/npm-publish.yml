@@ -113,6 +113,11 @@ jobs:
         env:
           DOWNSTREAM_TOKEN: ${{ secrets.DOWNSTREAM_DISPATCH_TOKEN }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+          # Token for the latest-release lookup on manual runs (the
+          # dispatch PAT below only holds the two downstream repos and
+          # cannot read this one). The dispatches re-export the PAT
+          # right before they run.
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -z "$DOWNSTREAM_TOKEN" ]; then
             echo "DOWNSTREAM_DISPATCH_TOKEN not set; downstream repos will pick the release up via their scheduled workflows"
