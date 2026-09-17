@@ -13,6 +13,12 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# CPU citizenship: capped + niced so a push from the live desktop
+# never starves it. Same rule the Justfile recipes carry; BG_JOBS
+# escapes on a known-idle box.
+export CARGO_BUILD_JOBS=$(( ($(nproc) + 3) / 4 ))
+net() { nice -n 19 ionice -c3 "$@"; }
+
 staged=$(git diff --cached --name-only; git diff --name-only origin/master..HEAD 2>/dev/null || true)
 if echo "$staged" | rg -q '^(design/|status\.md|project\.md)'; then
   echo "pre-push: internal docs staged (design/ status.md project.md are gitignored and private)"
@@ -22,9 +28,9 @@ if rg -n '\[[a-z]probe\]' src/ --glob '!tests/**' -q; then
   echo "pre-push: debug probes left in src/: $(rg -n '\[[a-z]probe\]' src/ -l)"
   exit 1
 fi
-cargo fmt --check >/dev/null
-cargo check --locked -q >/dev/null
-cargo check --locked -q --features ocr,rerank,http >/dev/null
+net cargo fmt --check >/dev/null
+net cargo check --locked -q >/dev/null
+net cargo check --locked -q --features ocr,rerank,http >/dev/null
 node --check npm/install.js >/dev/null
 node --check npm/bin/donsetch.js >/dev/null
 
