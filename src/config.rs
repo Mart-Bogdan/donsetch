@@ -1894,6 +1894,11 @@ const RESERVED_VARS: &[&str] = &[
     "DONSETCH_NO_CONFIG_FILE",
     "DONSETCH_PLUGIN",
     "DONSETCH_DEBUG",
+    "DONSETCH_NO_UPDATE_CHECK",
+    "DONSETCH_INSTALL_TAG",
+    "DONSETCH_RELEASES_BASE",
+    "DONSETCH_SKIP_DOWNLOAD",
+    "DONSETCH_FORCE_GLIBC",
     "BLESS_MCP_FIXTURES",
 ];
 
@@ -2629,8 +2634,8 @@ mod tests {
         let prefixes = [
             "DONSETCH_",
             "DONSEEK_",
-            "DONGHOST_",
             "DONSHEET_",
+            "DONGHOST_",
             "DONSIFT_",
             "CLOAKBROWSER_",
         ];
