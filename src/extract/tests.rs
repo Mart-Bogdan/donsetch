@@ -1262,6 +1262,7 @@ fn short_pdf_is_not_classified_as_an_html_shell() {
         Vec::new(),
         lang,
         Some(pages),
+        None,
         "https://example.com/receipt.pdf",
         &ExtractOptions::default(),
         16_000,
@@ -1548,6 +1549,52 @@ fn css_selector_bad_returns_error() {
         },
     );
     assert!(r.is_err());
+}
+
+/// A selector that matches nothing must return the DEFAULT rendering plus a
+/// notice, not a different (nav-first) rendering presented as success. Issue
+/// #238: the empty scope fell through to the rescue paths, so
+/// `selector: "article.nonexistent"` handed back menus at quality 0.30 with
+/// `content_ok: true`, and an agent that had constrained the scope could not
+/// tell the constraint was never applied.
+#[test]
+fn css_selector_matching_nothing_falls_back_with_a_notice() {
+    let html = r#"<html><body>
+<nav><a href="/a">Existing user? Sign In</a><a href="/b">Sign Up</a><a href="/c">Forums</a></nav>
+<article class="message">
+  <h1>The actual thread title</h1>
+  <p>Body marker: this paragraph is the content the agent asked for, and it is long enough that
+  the extractor keeps it as a real paragraph instead of dropping it as navigation noise.</p>
+  <p>A second paragraph, so the article is more than one block and the segmenter keeps the scope.</p>
+</article>
+</body></html>"#;
+
+    let default = extract_html_opts(html, &ExtractOptions::default());
+    let missed = extract_html_opts(
+        html,
+        &ExtractOptions {
+            selector: Some("article.nonexistent".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let notice = "*[selector \"article.nonexistent\": no matches : showing full content]*";
+    assert!(
+        missed.markdown.starts_with(notice),
+        "a missed selector must be labeled, got: {}",
+        &missed.markdown[..missed.markdown.len().min(160)]
+    );
+    let body = missed
+        .markdown
+        .split_once("\n\n")
+        .map(|(_, b)| b)
+        .unwrap_or("");
+    assert_eq!(
+        body.trim(),
+        default.markdown.trim(),
+        "a missed selector must show the DEFAULT rendering, not the rescue path's"
+    );
+    assert!(missed.markdown.contains("Body marker"));
 }
 
 // ════════════════════════════════════════════════════════════

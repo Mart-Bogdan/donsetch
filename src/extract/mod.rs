@@ -410,6 +410,7 @@ pub fn extract(
                     parsed.notes,
                     parsed.lang_info,
                     Some(parsed.pages_meta),
+                    None,
                     url,
                     opts,
                     max_chars,
@@ -485,12 +486,28 @@ pub fn extract(
     let has_skeletons = count_ascii_ci(&html_text, "aria-busy=\"true\"", 3) >= 3;
 
     // Scope: explicit selector or scored main-content detection.
-    let roots: Vec<scraper::ElementRef<'_>> = if let Some(sel) = &opts.selector {
-        let parsed =
-            scraper::Selector::parse(sel).map_err(|_| ExtractError::BadSelector(sel.clone()))?;
-        doc.select(&parsed).collect()
-    } else {
-        score::find_main(&doc).into_iter().collect()
+    //
+    // A selector that matches NOTHING must not continue with an empty
+    // scope: the blocks then come from an empty root set, the rescue
+    // paths take over, and the caller gets a DIFFERENT, worse rendering
+    // (nav-first, low quality) marked content_ok with no notice at all.
+    // An agent that constrained the scope could not tell the constraint
+    // was never applied. Mirror the documented focus/section behaviour:
+    // fall back to the DEFAULT scope and label it in the content.
+    let mut selector_missed: Option<String> = None;
+    let roots: Vec<scraper::ElementRef<'_>> = match &opts.selector {
+        Some(sel) => {
+            let parsed = scraper::Selector::parse(sel)
+                .map_err(|_| ExtractError::BadSelector(sel.clone()))?;
+            let matched: Vec<scraper::ElementRef<'_>> = doc.select(&parsed).collect();
+            if matched.is_empty() {
+                selector_missed = Some(sel.clone());
+                score::find_main(&doc).into_iter().collect()
+            } else {
+                matched
+            }
+        }
+        None => score::find_main(&doc).into_iter().collect(),
     };
 
     // Segment into typed blocks.
@@ -508,6 +525,7 @@ pub fn extract(
         Vec::new(),
         lang_info,
         None,
+        selector_missed,
         url,
         opts,
         max_chars,
@@ -618,6 +636,10 @@ fn downstream(
     notes: Vec<String>,
     lang_info: language::LanguageInfo,
     pdf_pages: Option<Vec<crate::pdf::PageMeta>>,
+    // Set by `extract` when an explicit selector matched no element, so the
+    // content can say the constraint was not applied (the DOM is out of
+    // reach down here). None for PDFs, which have no CSS scope.
+    selector_missed: Option<String>,
     url: &str,
     opts: &ExtractOptions,
     max_chars: usize,
@@ -783,6 +805,10 @@ fn downstream(
         if let Some(s) = &opts.section {
             full = format!("*[section \"{s}\": not found : showing full content]*\n\n{full}");
         }
+    } else if let Some(sel) = &selector_missed {
+        // Same contract as focus/section: the constraint was not applied,
+        // so the content is the default rendering and says so.
+        full = format!("*[selector \"{sel}\": no matches : showing full content]*\n\n{full}");
     } else if full.trim().is_empty() || (blocks_total == 0 && meta.title.is_none()) {
         full = format!("{url}\n\n*(no extractable content)*\n");
     }
