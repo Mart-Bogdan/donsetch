@@ -37,7 +37,11 @@ on:
 # cancellation: branch protection reads per-commit results, so a
 # cancelled master run would leave a gap rather than a verdict.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Keyed per SHA on pushes: the Release job's gate reads the CI conclusion
+  # for the tag's exact SHA, and a per-ref group let the next master push
+  # (and even a rerun of an older SHA) cancel the run the gate needs. The
+  # cost is that two master pushes can run at once instead of queueing.
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'push' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

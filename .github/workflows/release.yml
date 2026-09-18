@@ -393,8 +393,13 @@ jobs:
         run: |
           conclusion=""
           for i in $(seq 1 60); do
+            # A cancelled or still-running duplicate is not evidence about
+            # this commit: a later push (or a rerun of an older SHA) can
+            # cancel this SHA's run through the CI concurrency group, and
+            # blocking on that ships nothing. Poll for a real verdict, and
+            # still refuse on an actual failure.
             conclusion=$(gh api "repos/${{ github.repository }}/actions/runs?head_sha=${{ github.sha }}" \
-              --jq '.workflow_runs[] | select(.name == "CI") | .conclusion' | head -1)
+              --jq '[.workflow_runs[] | select(.name == "CI") | .conclusion | select(. != null and . != "cancelled" and . != "skipped")] | first // ""')
             [ -n "$conclusion" ] && break
             sleep 30
           done
