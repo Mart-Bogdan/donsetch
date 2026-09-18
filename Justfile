@@ -193,9 +193,18 @@ ship version:
     git push -q origin master
     git tag "v{{version}}"
     git push -q origin "v{{version}}"
-    run=$(gh run list --workflow=Release --limit 1 --json databaseId --jq '.[0].databaseId')
-    echo "ship: v{{version}} pushed. Release build run $run is underway."
-    echo "      watcher: just watch $run"
+    # Match the run by its branch (the tag), not by "newest": the run for
+    # this tag may not exist yet at this instant, and `.[0]` then answered
+    # with the PREVIOUS release's run id (v4.2.1 printed v4.2.0's).
+    run=""
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        run=$(gh run list --workflow=Release --limit 10 --json databaseId,headBranch \
+            --jq "[.[]|select(.headBranch==\"v{{version}}\")][0].databaseId // empty")
+        [ -n "$run" ] && break
+        sleep 3
+    done
+    echo "ship: v{{version}} pushed. Release build run ${run:-unknown} is underway."
+    echo "      watcher: just watch ${run:-<run-id>}"
     echo "      publish when green: gh release edit v{{version}} --draft=false"
 
 # Follow one GitHub Actions run to completion in the foreground.
