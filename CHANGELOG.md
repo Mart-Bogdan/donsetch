@@ -5,6 +5,19 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.1] - 2026-09-19
+
+### Fixed
+- `web_fetch` with a `selector` that matches nothing now returns the default
+  rendering plus a notice instead of a different, worse one presented as
+  success. The empty match set went on to the rescue paths, so the caller
+  got a navigation-first page (`content_kind: Page`, quality 0.30 on the
+  reported sites) with `content_ok: true` and no signal at all that the
+  constraint had never been applied. It now behaves like `focus` and
+  `section` already did: the constraint is reported as not applied, the
+  content is what the same fetch returns without a selector, and the first
+  line of it says so. Reported by daniel-plescia (#238).
+
 ## [4.2.0] - 2026-09-19
 
 The reliability wave. Nothing new to learn: the same four tools, with the
