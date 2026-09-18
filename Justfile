@@ -193,7 +193,7 @@ ship version:
     git push -q origin master
     git tag "v{{version}}"
     git push -q origin "v{{version}}"
-    run=$(gh run list --workflow=Release --limit 1 | head -1 | awk '{print $1}')
+    run=$(gh run list --workflow=Release --limit 1 --json databaseId --jq '.[0].databaseId')
     echo "ship: v{{version}} pushed. Release build run $run is underway."
     echo "      watcher: just watch $run"
     echo "      publish when green: gh release edit v{{version}} --draft=false"
