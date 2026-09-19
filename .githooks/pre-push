@@ -31,13 +31,13 @@ if rg -n '\[[a-z]probe\]' src/ --glob '!tests/**' -q; then
   echo "pre-push: debug probes left in src/: $(rg -n '\[[a-z]probe\]' src/ -l)"
   exit 1
 fi
+# --profile fast, not ci: the net has to cost seconds or it gets
+# bypassed, and the fast profile is the warm one every local recipe
+# uses. Both feature sets stay checked (the cfg-twin class is real and
+# cheap to keep): only this crate recompiles between them.
 net cargo fmt --check >/dev/null
-# --profile ci, like every Justfile recipe: the dev/debug graph is what
-# clean-bloat keeps deleting (the 110G/21G recidivism), so a check in it
-# rebuilds every dependency from scratch. The gate has to be affordable
-# or it gets bypassed.
-net cargo check --locked -q --profile ci >/dev/null
-net cargo check --locked -q --profile ci --features ocr,rerank,http >/dev/null
+net cargo check --locked -q --profile fast >/dev/null
+net cargo check --locked -q --profile fast --no-default-features >/dev/null
 node --check npm/install.js >/dev/null
 node --check npm/bin/donsetch.js >/dev/null
 
@@ -48,4 +48,4 @@ if [ "$crate" != "$npmpkg" ]; then
   echo "run: just ship <version> to keep both in step"
   exit 1
 fi
-echo "pre-push net ok (fmt, probes, dual-feature check, manifests in step)"
+echo "pre-push net ok (fmt, probes, dual-feature fast check, manifests in step)"

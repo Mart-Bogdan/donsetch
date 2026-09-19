@@ -5,6 +5,50 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.3] - 2026-09-19
+
+### Changed
+- The development loop and CI were rebuilt around what actually costs
+  time. Local recipes now run a `fast` cargo profile (debug codegen for
+  this crate, deps at opt-level 1, no debuginfo): an edit rebuilds in
+  seconds instead of the 8-12 minutes a release-shaped whole-crate
+  recompile cost. `just check` is the seconds-level signal, `just t` is
+  the touched scope, `just tci`/`just bin-ci` keep release-profile parity
+  on demand, and `just heavy` runs the tests that measure time and memory
+  (soak, corpus, landmarks, live probes). `just all` no longer runs the
+  suite: CI is the full gate and now runs it in parallel across the
+  matrix instead of serially under the push hook.
+- CI runs the full suite where a native warm toolchain makes it cheap
+  (both Linux arches) and a platform-specific smoke set plus
+  `clippy --all-targets` on the platforms whose cost is the link, not the
+  test count. The heavy set and all five fuzz targets run nightly; pull
+  requests fuzz one target. The pre-push hook checks both feature sets on
+  the fast profile, which is the same net for seconds instead of minutes.
+- `sccache` is used automatically when installed (`rust-sccache`), for
+  rustc and for the C/C++ compilers, so recompiles across profiles,
+  feature sets and branches become cache hits.
+
+### Fixed
+- The rerank model cache follows `DONSETCH_CACHE_DIR` and `[paths] cache_dir`
+  like every other cache (Mart-Bogdan, #243). It read `dirs::cache_dir()`
+  directly, so an override moved every cache except the model: a container or
+  a side-by-side install read and wrote the real user cache while `doctor`,
+  which checks the overridden root, reported the model as missing. The model
+  download publishes atomically now: it wrote straight to the final path, so
+  a concurrent first-use download could expose a half-written model, the load
+  failed, and reranking was silently skipped.
+- The page-history fingerprint describes the page, not the request
+  (Mart-Bogdan, #246). It was taken over the rendered, focus-filtered slice
+  with the request's own notices prepended, so two reads of one unchanged URL
+  with different reading parameters looked like a content change: an agent
+  alternating a focused and a full read got `changed` on every call, and one
+  call's parameters became the baseline for the next.
+- The profile label names the Chrome the build actually presents
+  (Mart-Bogdan, #247). `--version`, the scorecard label and every recorded
+  stealth baseline said `chrome-150` while the wire UA followed the detected
+  browser, and the undetected-browser fallback was presented as a fact about
+  the host instead of as a fallback.
+
 ## [4.2.2] - 2026-09-19
 
 ### Fixed

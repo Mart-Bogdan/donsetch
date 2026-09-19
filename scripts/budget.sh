@@ -61,4 +61,19 @@ export NUM_JOBS="$jobs"
 # nasm/cmake read this one too when a build script hardcodes its own -j.
 export CARGO_MAKEFLAGS="-j$jobs"
 
+# sccache, when installed: the same source compiled for another profile,
+# feature set or branch becomes a cache hit instead of work. rustc goes
+# through RUSTC_WRAPPER; the C/C++ compilers go through CC/CXX, which is
+# where the real money is (BoringSSL's C++ build is the single most
+# expensive thing in this graph, and every profile flip used to re-pay
+# it). The cache lives under target/ so it travels with the artifacts.
+# Incremental units are not cached (by design) : this buys the deps.
+if command -v sccache >/dev/null 2>&1; then
+    export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
+    export CC="${CC:-sccache cc}"
+    export CXX="${CXX:-sccache c++}"
+    export SCCACHE_DIR="${SCCACHE_DIR:-$PWD/target/sccache}"
+    export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-10G}"
+fi
+
 exec nice -n 19 ionice -c3 taskset -c "$cores" "$@"
