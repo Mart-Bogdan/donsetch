@@ -329,16 +329,11 @@ impl Fetcher {
                 Ok(o) => o,
                 Err(e) => {
                     if let (Some(pool), Some(id)) = (&self.egress, &pool_lane_id) {
-                        let msg = e.to_string();
-                        if matches!(e, FetchError::Timeout) || msg.contains("timed out") {
-                            pool.note_fetch_timeout(&fetch_host, id);
-                        } else if msg.contains("CONNECT -> 407") {
-                            pool.note_fetch_auth_fail(&fetch_host, id);
-                        } else if matches!(e, FetchError::Io(_) | FetchError::Tls(_))
-                            || msg.contains("connection")
-                            || msg.contains("connect")
-                        {
-                            pool.note_fetch_dead(&fetch_host, id);
+                        match lane_note(&e) {
+                            Some(LaneNote::Timeout) => pool.note_fetch_timeout(&fetch_host, id),
+                            Some(LaneNote::AuthFail) => pool.note_fetch_auth_fail(&fetch_host, id),
+                            Some(LaneNote::Dead) => pool.note_fetch_dead(&fetch_host, id),
+                            None => {}
                         }
                     }
                     return Err(e);
@@ -1223,9 +1218,86 @@ fn referer_value(referer: &str, target: &str) -> String {
     }
 }
 
+/// Which lane-health signal a transport failure carries, for the egress
+/// pool. [`lane_note`] maps an error to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaneNote {
+    Timeout,
+    AuthFail,
+    Dead,
+}
+
+/// Lane health from a transport failure, by variant rather than by
+/// prose.
+///
+/// #248 split the resolver failure out of `Io` and the resolver timeout
+/// out of `Timeout` (`Dns`, `DnsTimeout`), and this site kept matching
+/// only the old variants: a proxy lane whose own name stopped resolving
+/// was never marked dead, and a resolver timeout was not counted at all
+/// (the message reads "dns timeout", which `contains("timed out")`
+/// never matched).
+///
+/// A lane dials with the target host but resolves its own, so a name
+/// failure here belongs to the lane, not the origin. A policy refusal
+/// (`Ssrf`) is about the URL and a protocol error is about the origin:
+/// neither says anything about the lane.
+fn lane_note(e: &FetchError) -> Option<LaneNote> {
+    let msg = e.to_string();
+    match e {
+        FetchError::Timeout | FetchError::DnsTimeout(_) => Some(LaneNote::Timeout),
+        FetchError::Dns(_) | FetchError::Io(_) | FetchError::Tls(_) => Some(LaneNote::Dead),
+        // A proxy that demands credentials. Ahead of the text arms:
+        // "CONNECT -> 407" must never read as a dead lane.
+        _ if msg.contains("CONNECT -> 407") => Some(LaneNote::AuthFail),
+        // The pre-#248 text arms, kept for the same Http shapes they
+        // used to catch.
+        _ if msg.contains("timed out") => Some(LaneNote::Timeout),
+        _ if msg.contains("connection") || msg.contains("connect") => Some(LaneNote::Dead),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod transport_exit_tests {
     use super::*;
+
+    // #248 split Dns/DnsTimeout out of Io/Timeout; this site's lane
+    // accounting kept matching the old variants, so a proxy lane was
+    // never retired when its own name stopped resolving, and a resolver
+    // timeout was not counted at all.
+    #[test]
+    fn lane_notes_know_the_dns_variants() {
+        assert_eq!(
+            lane_note(&FetchError::Dns(
+                "could not resolve gw.example: no such host".into()
+            )),
+            Some(LaneNote::Dead)
+        );
+        assert_eq!(
+            lane_note(&FetchError::DnsTimeout(
+                "the resolver did not answer within 5s for gw.example".into()
+            )),
+            Some(LaneNote::Timeout)
+        );
+        assert_eq!(lane_note(&FetchError::Timeout), Some(LaneNote::Timeout));
+        assert_eq!(
+            lane_note(&FetchError::Io(std::io::Error::other("connection refused"))),
+            Some(LaneNote::Dead)
+        );
+        assert_eq!(
+            lane_note(&FetchError::Http("CONNECT -> 407".into())),
+            Some(LaneNote::AuthFail)
+        );
+        // Not the lane's fault: a policy refusal and an origin-side
+        // protocol error leave lane health alone.
+        assert_eq!(
+            lane_note(&FetchError::Ssrf(
+                "10.0.0.1 is a private/loopback address : SSRF guard".into()
+            )),
+            None
+        );
+        assert_eq!(lane_note(&FetchError::Http("parser died".into())), None);
+    }
 
     // The h3 lane used to hand back a literal Verdict::ContentOk for
     // any status >= 200: a Cloudflare challenge served over h3 (403 +

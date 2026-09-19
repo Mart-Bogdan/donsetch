@@ -22,6 +22,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   head. Two stale numbers fixed: the tests badge said 1270 while the body
   said 727.
 
+### Fixed
+- A crawl seeded on a page at the host root (`/p0.html`, `/index.php`)
+  returned the seed alone, or nothing, with `complete: true`. The
+  auto-scope rule that keeps `/tokio` on docs.rs inside `/tokio/*` was
+  applied to the file name too, so the scope became `/p0.html/*` and
+  every sibling link was filtered out before it reached the frontier.
+  Separately, the quality gate skipped a low-quality page before
+  harvesting its outlinks, and a hub page (a link list with almost no
+  prose) is the lowest-quality page on a site and the one a crawl is
+  seeded from. A root-level file now scopes to the host, and a skipped
+  page still feeds the frontier (mnaza, #250, fixes #249).
+- A resolver that could not answer (EAI_AGAIN: resolv.conf unreachable,
+  SERVFAIL, a VPN flap) was reported as `network.dns` with
+  `errorKind: permanent` and a do-not-retry action, the mirror of #248:
+  the outage read as a dead name. It is transient now, while a name that
+  does not exist stays permanent. Search enrichment no longer demotes a
+  live result when the resolver times out during the prefetch, and the
+  ghost probe's failure class and the search task status label kept their
+  signals (mnaza, #251).
+- Egress lane health learned the same variants: a proxy lane whose own
+  name stops resolving is marked dead again, and a resolver timeout is
+  counted as a timeout (the message reads "dns timeout", which the old
+  `contains("timed out")` check never matched).
+
 ## [4.2.4] - 2026-09-19
 
 ### Added
