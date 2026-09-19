@@ -248,6 +248,15 @@ jobs:
         run: cargo nextest run --profile ci --cargo-profile ci ${{ matrix.features }} --target ${{ matrix.target }} -E 'test(mcp::supervisor) | test(profile::) | test(extract::) | test(pdf::) | test(ghost::)'
         timeout-minutes: 30
 
+      # The cross-platform check for the lanes that run no suite: compile
+      # every target (tests included, no LINK). This is what keeps those
+      # lanes meaningful, and on macos-x86_64 it is the only per-push
+      # compilation of darwin-x86_64, which is a release target.
+      - name: Compile-check all targets (no test link)
+        if: matrix.tests == 'none'
+        run: cargo check --profile ci --all-targets ${{ matrix.features }} --target ${{ matrix.target }}
+        timeout-minutes: 30
+
       # Windows: compile-check the release feature set without the
       # 305MB MSVC static link. Catches feature-gating typos and
       # ort-sys build-script breakage at merge time; the real link
