@@ -5,6 +5,24 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- The tier-1 persona fetch path (MCP `web_fetch`, and the CLI `fetch` that
+  shares it) resolves `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` instead of
+  dialing direct, and re-resolves it at every redirect hop the way the main
+  fetch lane already did. Behind an egress that only allows outbound
+  traffic through a forward proxy, every tool call failed with "Network is
+  unreachable" while `donsetch doctor` reported egress healthy: two call
+  chains into the same dialer, and only one of them read the ambient proxy.
+  Search engine hops and the render prefetch assets follow the same
+  convention now. Reported by theangrykangaroo.
+- The mid-write daemon-restart test is causal instead of timed: the client
+  waits for the child to close its own stdin before writing, so it no
+  longer races `sh` startup on a loaded macOS runner. That race is what
+  turned CI red on a documentation-only pull request (#239), as a failed
+  spawn assert before and a 30s hang after.
+
 ## [4.2.1] - 2026-09-19
 
 ### Fixed
