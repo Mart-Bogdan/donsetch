@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer races `sh` startup on a loaded macOS runner. That race is what
   turned CI red on a documentation-only pull request (#239), as a failed
   spawn assert before and a 30s hang after.
+- `donsetch doctor` probes the tool lane too. Its network check rode the
+  generic fetch lane only, which is a different call chain into the same
+  dialer than the tier-1 persona path that `web_fetch` and the CLI `fetch`
+  ride, so a fault in that one chain was reported as healthy egress: the
+  report above came in as a suspected deployment problem because of it.
+  The check now reports `generic and tool lanes`, and says which lane
+  failed when they disagree.
 
 ## [4.2.1] - 2026-09-19
 
