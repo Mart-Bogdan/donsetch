@@ -185,10 +185,12 @@ fn validate_url_basic_with_policy(
 /// The transport layer (`transport::tcp::happy_connect`) re-validates
 /// resolved addresses at connect time and filters private IPs, so
 /// an attacker that returns public at validation and private at
-/// connect is still blocked at connect. However, without full
-/// DNS pinning (reusing the validated IPs for the connect) there
-/// is a residual window between the two resolutions. Full pinning
-/// is not implemented; this is documented as a residual limitation.
+/// connect is still blocked at connect. Both sides now resolve through
+/// `transport::dns`, so inside the cache TTL they see the SAME answer,
+/// which narrows the window to one answer per TTL instead of one per
+/// step; outside it, the window between the two resolutions remains.
+/// Full DNS pinning (forcing the dial onto the validated addresses) is
+/// still not implemented.
 /// Redirects are re-validated per hop via `validate_redirect_url`
 /// (sync) and `ensure_url_safe` (async) where applicable.
 pub async fn ensure_url_safe(url_str: &str) -> Result<url::Url, crate::error::FetchError> {
@@ -201,38 +203,19 @@ pub async fn ensure_url_safe(url_str: &str) -> Result<url::Url, crate::error::Fe
     let host: String = url.host_str().unwrap_or("").to_owned();
     // Literal IP already blocked by validate_url_basic; only hostnames need DNS.
     // Fail closed on resolution errors for browser/network navigation.
+    // Resolved through the shared cache (transport::dns): the connect that
+    // follows this check asks for the same name, and the resolver is a
+    // network round trip on a box with no local caching daemon.
     let port = url.port_or_known_default().unwrap_or(443);
-    let lookup = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio::net::lookup_host((host.as_str(), port)),
-    )
-    .await;
-    match lookup {
-        Ok(Ok(addrs)) => {
-            let mut any = false;
-            for addr in addrs {
-                any = true;
-                if is_ssrf_resolved_ip(&addr.ip()) {
-                    return Err(crate::error::FetchError::Ssrf(format!(
-                        "{host} resolves to private/loopback address {} : SSRF guard (set DONSETCH_ALLOW_PRIVATE_EGRESS to override)",
-                        addr.ip()
-                    )));
-                }
-            }
-            if !any {
-                return Err(crate::error::FetchError::Dns(format!(
-                    "{host} resolved to no addresses"
-                )));
-            }
-            Ok(url)
+    for addr in crate::transport::dns::resolve(&host, port).await? {
+        if is_ssrf_resolved_ip(&addr.ip()) {
+            return Err(crate::error::FetchError::Ssrf(format!(
+                "{host} resolves to private/loopback address {} : SSRF guard (set DONSETCH_ALLOW_PRIVATE_EGRESS to override)",
+                addr.ip()
+            )));
         }
-        Ok(Err(e)) => Err(crate::error::FetchError::Dns(format!(
-            "could not resolve {host}: {e}"
-        ))),
-        Err(_) => Err(crate::error::FetchError::DnsTimeout(format!(
-            "the resolver did not answer within 5s for {host}"
-        ))),
     }
+    Ok(url)
 }
 
 /// Validate a redirect target URL string relative to a base URL.

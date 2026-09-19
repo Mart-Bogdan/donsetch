@@ -115,6 +115,11 @@ section!(FetchSection {
     ocr_max_pages: u32 = 25,
     resume_ttl_secs: u64 = 7200,
     host_pace_file: bool = true,
+    /// How long a resolved name is reused in-process, in seconds. The
+    /// host resolver is a network round trip on a box without a local
+    /// caching daemon, and one fetch asks for the same name twice (the
+    /// SSRF guard, then the connect). 0 disables the cache.
+    dns_cache_ttl_secs: u64 = 30,
 });
 
 section!(BypassSection {
@@ -1593,6 +1598,13 @@ pub(crate) fn fieldbook() -> &'static Fieldbook {
             FieldKind::Bool,
             "true",
             "cross-process per-host politeness file for crawls",
+        ),
+        (
+            "fetch",
+            "dns_cache_ttl_secs",
+            FieldKind::Int,
+            "30",
+            "seconds a resolved name is reused in-process; 0 disables",
         ),
         // bypass
         (

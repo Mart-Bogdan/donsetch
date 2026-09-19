@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- An in-process DNS cache. The host resolver is a network round trip on a
+  box without a local caching daemon (public resolvers, no nscd or
+  systemd-resolved), measured at ~55ms per lookup here, and one fetch
+  asked for the same name at least twice: the SSRF guard, then the
+  connect, plus once per redirect hop and once per page of a crawl. A
+  4-page crawl of one host sent 12 DNS query batches; it sends 1 now.
+  Positive answers only, cached for `fetch.dns_cache_ttl_secs` (default
+  30, 0 disables). A failure or a timeout is never cached, so a resolver
+  blip cannot block a host for the TTL, and the cache holds addresses
+  rather than decisions: the guard and the connect still filter every
+  address they dial, so a name that starts answering with a private
+  address inside the TTL is still refused. The h3 lane now resolves
+  through the same cache instead of running its own blocking lookup on a
+  worker thread.
+
 ### Fixed
+- The h3 lane built a fresh `chrome_150` browser profile per request
+  instead of using the identity the fetch presents everywhere else, so
+  its QUIC and TLS configuration could drift from the caller's profile.
+  It now takes the caller's profile.
 - A URL whose host does not resolve is a DNS failure, not a policy block
   (Mart-Bogdan, #248). The SSRF guard's DNS messages ended in "fail-closed
   SSRF guard", and the classifier matched that phrase before it matched

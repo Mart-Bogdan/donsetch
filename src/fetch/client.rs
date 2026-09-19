@@ -104,7 +104,6 @@ impl Fetcher {
         self
     }
 
-    #[allow(dead_code)] // MCP surface will need this.
     pub fn profile(&self) -> &BrowserProfile {
         &self.profile
     }
@@ -809,6 +808,11 @@ impl Fetcher {
                 &authority,
                 req_headers.clone(),
                 None,
+                // The caller's identity, not a fresh chrome_150 built per
+                // request: the QUIC config and the TLS tables it carries
+                // must be the ones this fetch is presenting everywhere
+                // else.
+                self.profile(),
             )
             .await
             {
