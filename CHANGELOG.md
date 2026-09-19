@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the prewarm lane did not just fail: it scored the result
   `QualityObs::Dead`, so live results were demoted to dead links because
   of the egress rather than the page. Reported by theangrykangaroo.
+- The Xvfb readiness probe accepts a display that exists only in the
+  abstract socket namespace. Xvfb binds its socket name both as a file
+  under `/tmp/.X11-unix` and as a Linux abstract socket, but the probe
+  looked only at the file. Under WSL that directory is a read-only mount,
+  so the file can never appear: every launch spent the full 10s readiness
+  budget waiting on it, then reported a healthy display as dead and fell
+  back to the detectable `--headless=new` instead of the headful mode the
+  virtual display exists for. The file is still probed first, so a stale
+  socket is still read as dead. On WSL, tier-2 captures go from 19.1s to
+  7.3s and run headful as intended.
 - The mid-write daemon-restart test is causal instead of timed: the client
   waits for the child to close its own stdin before writing, so it no
   longer races `sh` startup on a loaded macOS runner. That race is what
