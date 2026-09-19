@@ -7,7 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Search plugins can report why they failed. The format-1 error envelope
+  takes an optional `error_kind` (`invalid_key`, `credit_depleted`,
+  `rate_limited`, `server_error`, `network_error`), classified into the same
+  key states a native adapter derives from an HTTP status, so a plugin
+  whose API key was revoked is parked instead of being spawned again on
+  every search for the rest of the day. `keys list` shows the state,
+  `doctor` warns about it, and re-registering the plugin is the recovery.
+  An envelope without `error_kind` records no state, so every existing
+  plugin keeps its behaviour. The parked cases also keep the plugin's own
+  words: `keys add plugin --test` used to print a bare "invalid key" at
+  exactly the moment a user is debugging credentials (googio).
+
+### Changed
+- The ghost no longer injects a script into the page before its own scripts
+  run. It used to define `navigator.languages`, fill in `window.chrome` and
+  `window.chrome.runtime`, and replace an empty `navigator.plugins`, on the
+  theory that some launches leave those gaps. Measured against real Chrome
+  on both backends (headful Xvfb and `--headless=new`), the gaps are not
+  there, and every patch that fired moved the page further from a real one:
+  real Chrome has no own properties on `navigator` at all, `chrome.runtime`
+  is absent rather than present-and-empty, and `plugins` is a real 5-entry
+  PluginArray with a working `item`. The README's "no JS injection" line is
+  true now rather than aspirational, and it says what the page gets.
+- `_meta.engines` carries one lane per provider the search tried, in walk
+  order, instead of only the one that answered: each lane has its own wall
+  time and a status (`empty`, `rate_limited`, `error`, `ok`). A caller can
+  no longer read "Tavily answered" as "Tavily is the default" when Serper
+  was asked first and came back empty and a monitor paged a provider change
+  that never happened (#253).
+
 ### Fixed
+- One entry the key-file schema rejects no longer discards the whole store.
+  `byok-keys.json` was parsed as a unit and ANY error returned an empty
+  config with "corrupt key file (...), ignoring", so a single hand-edited
+  `"state": "dead"` cost every provider at once and the keyless answer that
+  followed read as "donsetch has no provider fallback". The decode is per
+  entry now: a rejected key is dropped and named on stderr, an empty key is
+  dropped for the same reason the write path rejects it, and every other
+  key keeps working. A file that is not JSON at all still degrades to
+  empty, because nothing in it can be trusted.
+- The Turnstile click never aimed at the widget: the lookup selector was
+  invalid CSS (`iframe[src*=challenges.cloudflare]` carries an unquoted
+  dot), and since it is one selector list, that single bad arm made
+  `querySelector` throw for all three arms and the `.ok()` chain swallowed
+  it, so every click went to a hardcoded point with nothing in the log.
+  Verified on a real browser: the unquoted form throws SyntaxError while
+  the quoted form matches, and `iframe[src*=turnstile]` alone is valid,
+  which is what makes the dot the culprit. The values are quoted, the
+  container of the hidden `cf-turnstile-response` input is the fallback
+  (Cloudflare keeps the real iframe in a closed shadow root), and a failed
+  lookup logs its reason (Mart-Bogdan, #257).
+- A walled fetch reported `"verdict": "ContentOk"` beside
+  `"code": "wall.captcha"`, because the success path's default reached the
+  failure envelope. A failure never claims content now: a verdict the run
+  actually earned is kept, and otherwise the failure names itself,
+  `Blocked` for a wall and `Unknown` for anything else.
+- A failed second solve pass left no trace step, so the escalation listed
+  one `ghost-render` while the log showed two attempts. The failing pass
+  records `solve-pass2` with "still walled" and its own ms.
+- `[ghost] Xvfb started` was printed for a display that was reused rather
+  than started.
+- `cargo run` printed "ignoring DONSETCH_FEATURES: expected
+  DONSETCH_<SECTION>__<KEY>" for each of build.rs' cargo:rustc-env values.
+  They are reserved names now, not misnamed settings.
 - The BYOK key store's CLI said "dead" for a key state the file does not
   accept. `keys list`'s legend printed one ✗ labelled "dead" for two states,
   its no-usable-key warning said "all keys are dead", `keys --help` said
