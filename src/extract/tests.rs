@@ -61,8 +61,10 @@ fn fingerprint_describes_the_page_not_the_request() {
     );
 
     let plain = extract_html_opts(&html, &ExtractOptions::default());
-    let mut opts = ExtractOptions::default();
-    opts.focus = Some("needle marker".into());
+    let opts = ExtractOptions {
+        focus: Some("needle marker".into()),
+        ..Default::default()
+    };
     let focused = extract_html_opts(&html, &opts);
 
     assert_ne!(
