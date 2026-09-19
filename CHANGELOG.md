@@ -5,6 +5,23 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.5] - 2026-09-19
+
+### Changed
+- The npm package page carries a real README instead of the stub: the fourth
+  tool (`web_screenshot`), the feature list, the full platform matrix with
+  OCR/rerank availability per platform, the install troubleshooting notes,
+  the sponsor tiers, and links to the docs. `package.json` gained a
+  `funding` field, so npm shows a sponsor link on the package page, and
+  search keywords that describe what the package actually is.
+- The repository README was rewritten: 1090 lines to 700, sponsors moved
+  from dead last to the fourth section with a nav link from the top, the
+  v3 and v4 "what's new" sections folded into the feature sections they
+  describe, the WRB results replaced by a pointer to the WRB repo, and the
+  comparison table cut from 18 rows to 12 plus a short Firecrawl head to
+  head. Two stale numbers fixed: the tests badge said 1270 while the body
+  said 727.
+
 ## [4.2.4] - 2026-09-19
 
 ### Added
