@@ -225,6 +225,13 @@ mod linux {
             })
         }
 
+        /// True when this handle borrowed an already-running display
+        /// instead of starting one. The logs say which, and the field
+        /// that knows is private to this module on purpose.
+        pub fn is_borrowed(&self) -> bool {
+            self.child.is_none()
+        }
+
         /// The DISPLAY environment value for Chrome.
         pub fn display_env(&self) -> String {
             format!(":{}", display_num())
@@ -491,6 +498,13 @@ mod other {
         pub fn display_env(&self) -> String {
             String::new()
         }
+        /// Never borrowed: this platform has no Xvfb to borrow. The
+        /// stub must expose the same API as the real module or
+        /// manager.rs stops compiling off Linux (it did, in the
+        /// darwin-arm64 release build for 4.2.6).
+        pub fn is_borrowed(&self) -> bool {
+            false
+        }
         #[allow(dead_code)]
         pub async fn kill(self) {}
         #[allow(dead_code)]
@@ -603,9 +617,11 @@ mod tests {
         }
         let owned = x::Xvfb::start().await.expect("start owned");
         assert!(owned.lock_path.is_some(), "owner holds the gate");
+        assert!(!owned.is_borrowed(), "an owned display is not borrowed");
         let reused = x::Xvfb::start().await.expect("start reuse");
         assert!(reused.lock_path.is_none(), "reuser borrows, no gate");
         assert!(reused.child.is_none(), "reuser does not own a child");
+        assert!(reused.is_borrowed(), "the reuser reports borrowed");
         drop(reused);
         owned.kill().await;
         unsafe {
