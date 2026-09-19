@@ -183,13 +183,6 @@ impl GhostWire {
             locale,
         }
     }
-
-    /// Chrome --lang wants a BCP-47-ish tag; navigator.languages
-    /// wants the full list. Keep both derived from one locale.
-    pub fn languages_js(&self) -> String {
-        let lang = self.locale.split('-').next().unwrap_or("en");
-        format!("['{}', '{}']", self.locale, lang)
-    }
 }
 
 /// Persistent profile dir: aged state passes challenges
@@ -969,41 +962,36 @@ impl Ghost {
         }
         cdp.call(Some(&session), "Page.enable", json!({})).await?;
 
-        // Stealth JS injection : runs before any page script.
-        // Patches only what real Chrome guarantees and our launch
-        // does NOT:
-        // - navigator.languages: ensure it's set (some Xvfb setups
-        //   don't inherit the system locale)
-        // - window.chrome: ensure it exists (some headful setups
-        //   on Linux miss the chrome.runtime object)
-        // - navigator.permissions.query: patch notifications to
-        //   return 'denied' (real Chrome default, automation
-        //   returns 'prompt' : a known detection vector)
-        // - navigator.plugins: ensure length > 0 (headful Chrome
-        //   should have plugins, but some setups don't)
-        // navigator.webdriver is DELIBERATELY not patched:
-        // defining it, even with get() => false, is itself the
-        // detection vector fpscanner flags (real Chrome leaves
-        // the property undefined); --disable-blink-features=
-        // AutomationControlled on the launch args handles the
-        // headless-mode case without defining anything.
-        let langs_js = wire.languages_js();
-        let _ = cdp
-            .call(
-                Some(&session),
-                "Page.addScriptToEvaluateOnNewDocument",
-                json!({
-                    "source": format!("\
-                        Object.defineProperty(navigator, 'languages', {{ get: () => {langs_js} }});\
-                        if (!window.chrome) {{ window.chrome = {{}}; }}\
-                        if (!window.chrome.runtime) {{ window.chrome.runtime = {{}}; }}\
-                        if (navigator.plugins && navigator.plugins.length === 0) {{\
-                            Object.defineProperty(navigator, 'plugins', {{ get: () => [{{ name: 'Chrome PDF Plugin' }}, {{ name: 'Chrome PDF Viewer' }}, {{ name: 'Native Client' }}] }});\
-                        }}\
-                    ")
-                }),
-            )
-            .await;
+        // No script is injected before page scripts, deliberately.
+        //
+        // This used to define `navigator.languages`, fill in
+        // `window.chrome` / `window.chrome.runtime`, and replace an empty
+        // `navigator.plugins`, on the theory that some launches leave
+        // those gaps. Measured 2026-09-19 against real Chrome on both
+        // backends (headful Xvfb and `--headless=new`), the gaps are not
+        // there, and every patch that fired moved the page FURTHER from a
+        // real one:
+        //
+        // - `navigator.languages` already read ["en-US","en"] from
+        //   `--lang`; the patch only added an own accessor on the
+        //   navigator instance, and real Chrome has NO own properties on
+        //   `navigator` at all. The added property is itself the
+        //   fingerprint.
+        // - `window.chrome` is never missing: real Chrome exposes it as an
+        //   own value property carrying {loadTimes, csi, app}.
+        // - `chrome.runtime` is not present-but-empty in real Chrome, it is
+        //   ABSENT (`'runtime' in chrome` is false), so creating a hollow
+        //   `{}` was the tell rather than the fix.
+        // - `plugins` is a real 5-entry PluginArray with a working `item`;
+        //   the replacement was a plain Array, which no real Chrome ever
+        //   has, so it could only trade one tell for a worse one.
+        //
+        // `navigator.webdriver` stays unpatched for the reason it always
+        // did: defining it, even as `get() => false`, is the detection
+        // vector, and real Chrome already reports false with the property
+        // living on Navigator.prototype.
+        // `--disable-blink-features=AutomationControlled` covers the
+        // headless case without defining anything.
         // invisible even on macOS (Dock) and Windows (taskbar).
         // Combined with --window-position=-32000,-32000, the
         // window is both off-screen and minimized. Chrome still

@@ -472,7 +472,7 @@ A dev rig in the repo captures the real browser's raw stream, and the parity exp
 | 4. Bounce | Cookies to tier 1, refetch at full speed, browser sleeps | ~100-300ms |
 | 5. After | Tier 1 with warm cookies, browser stays asleep | ~100-300ms |
 
-Raw CDP launch without automation flags, so `navigator.webdriver` is natively false. No JS injection, no spoofed patches, real window, real GPU, real locale.
+Raw CDP launch without automation flags, so `navigator.webdriver` is natively false. Nothing is injected before page scripts: a real window, real GPU, real locale, a real `PluginArray`, and the `window.chrome` object Chrome actually ships. Where a stealth plugin patches a property so it looks less automated, this leaves the real one alone, because a patched property is a fingerprint of its own.
 
 <details>
 <summary><b>Process lifecycle, the RAM-smart part</b></summary>
