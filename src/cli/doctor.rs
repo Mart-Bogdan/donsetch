@@ -2166,6 +2166,9 @@ mod doctor_ultra_tests {
         }
     }
 
+    // Unix only: `/bin/true` is path-form, so on Windows it does not
+    // exist and both plugins land in "program not found" as well.
+    #[cfg(unix)]
     #[test]
     fn a_parked_plugin_warns_instead_of_passing() {
         // The gap: a plugin sitting in `invalid` passed the check, so
