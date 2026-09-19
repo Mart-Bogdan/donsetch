@@ -5,6 +5,20 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- The integration tests build as one binary instead of ten. Every file
+  directly under `tests/` was its own crate, so each one linked the whole
+  library and dependency tree again and re-generated the library's generic
+  code it used; they are now modules of `tests/it/`. At the `ci` profile's
+  opt-level 3 that cut the integration tests' compile time from about 93s
+  of combined unit time to under 9s on a local build. nextest still runs
+  every test in its own process, so isolation is unchanged. A new
+  integration test goes in `tests/it/` with a `mod` line in
+  `tests/it/main.rs`: a new top-level `tests/*.rs` file would quietly
+  become a separate binary again (Mart-Bogdan).
+
 ## [4.2.6] - 2026-09-19
 
 ### Added
