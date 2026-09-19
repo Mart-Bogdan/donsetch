@@ -188,7 +188,10 @@ mod inner {
             // fails, reranking is silently skipped, and the ranking
             // changes. The temp name carries the pid so two writers never
             // share one.
-            let mut tmp_name = dest.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+            let mut tmp_name = dest
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_default();
             tmp_name.push(format!(".{}.part", std::process::id()));
             let tmp = dest.with_file_name(tmp_name);
             std::fs::write(&tmp, &body).map_err(|e| format!("write {tmp:?}: {e}"))?;
@@ -583,10 +586,8 @@ mod inner {
         /// paths::cache_dir(), reports the model as missing.
         #[test]
         fn cache_dir_follows_the_override() {
-            let dir = std::env::temp_dir().join(format!(
-                "donsetch-rerank-cache-{}",
-                std::process::id()
-            ));
+            let dir =
+                std::env::temp_dir().join(format!("donsetch-rerank-cache-{}", std::process::id()));
             let prev = std::env::var_os("DONSETCH_CACHE_DIR");
             // SAFETY: process-scoped, and nextest runs one test per process.
             unsafe { std::env::set_var("DONSETCH_CACHE_DIR", &dir) };
