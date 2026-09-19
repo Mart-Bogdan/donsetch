@@ -865,14 +865,19 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
                     args2["_no_adapter"] = json!(true);
                     return Box::pin(fetch_single_inner(daemon, &args2, &orig_url)).await;
                 }
+                let kind = fetch_error_kind(&e);
                 return tool_error_structured(
                     friendly_fetch_error(&e),
-                    fetch_error_kind(&e),
+                    kind,
                     Some(json!({
                         "url": url,
                         "status": 0,
+                        // The error's OWN code outranks the text
+                        // classifier: the guard knows a resolution failure
+                        // is a DNS failure (#248).
+                        "code": fetch_error_code(&e),
                         "fetch_error": transport_class(&e),
-                        "next_action": next_action_for(None, 0, fetch_error_kind(&e)),
+                        "next_action": next_action_for(None, 0, kind),
                         "escalation": trace.value(),
                     })),
                 );
@@ -2269,13 +2274,24 @@ pub(super) async fn fetch_with_actions(
         && !cur.starts_with("about:")
         && let Err(e) = crate::fetch::guards::ensure_url_safe(&cur).await
     {
+        let kind = fetch_error_kind(&e);
+        // A click lands on a host that does not resolve, or hits a
+        // resolver hiccup, just as easily as on a private address: the
+        // kind, the code and the message come from the error itself
+        // (#248). Only the policy case gets the private-address prose.
+        let next_action = if matches!(e, FetchError::Ssrf(_)) {
+            "action caused navigation to a private/loopback URL : blocked".to_string()
+        } else {
+            next_action_for(None, 0, kind)
+        };
         return tool_error_structured(
             format!("blocked after action navigation: {e}"),
-            "permanent",
+            kind,
             Some(json!({
                 "url": cur,
+                "code": fetch_error_code(&e),
                 "escalation": trace.value(),
-                "next_action": "action caused navigation to a private/loopback URL : blocked",
+                "next_action": next_action,
             })),
         );
     }

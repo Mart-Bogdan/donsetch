@@ -131,17 +131,19 @@ fn select_dial_addr(
         return addrs
             .into_iter()
             .next()
-            .ok_or_else(|| FetchError::Http(format!("dns resolve empty for {label}")));
+            .ok_or_else(|| FetchError::Dns(format!("resolve returned no addresses for {label}")));
     }
     if addrs.is_empty() {
-        return Err(FetchError::Http(format!("dns resolve empty for {label}")));
+        return Err(FetchError::Dns(format!(
+            "resolve returned no addresses for {label}"
+        )));
     }
     addrs
         .into_iter()
         .find(|a| !crate::fetch::guards::is_ssrf_resolved_ip(&a.ip()))
         .ok_or_else(|| {
-            FetchError::Http(format!(
-                "dns: {label} resolves to a private/loopback address : SSRF guard"
+            FetchError::Ssrf(format!(
+                "{label} resolves to a private/loopback address : SSRF guard"
             ))
         })
 }
@@ -607,9 +609,12 @@ mod tests {
         );
         // Resolves only to private/loopback -> refused (SSRF guard).
         assert!(select_dial_addr(vec![meta, loop_], false, "h").is_err());
-        // Empty resolution -> the honest empty error, not a guard error.
+        // Empty resolution -> the honest name failure, not a guard error.
         let err = select_dial_addr(vec![], false, "h").unwrap_err();
-        assert!(format!("{err:?}").contains("empty"));
+        assert!(
+            matches!(err, FetchError::Dns(_)),
+            "an empty resolution is a name failure, not a policy block: {err:?}"
+        );
         // The escape hatch takes the first address as-is (local egress).
         assert_eq!(
             select_dial_addr(vec![loop_, public], true, "h").unwrap(),

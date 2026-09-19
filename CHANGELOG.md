@@ -5,6 +5,23 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- A URL whose host does not resolve is a DNS failure, not a policy block
+  (Mart-Bogdan, #248). The SSRF guard's DNS messages ended in "fail-closed
+  SSRF guard", and the classifier matched that phrase before it matched
+  "dns", so a typo, a dead domain or a resolver problem came back as
+  `guard.ssrf` with `errorKind: permanent`: an agent branching on the code
+  concluded the target was deliberately forbidden. A resolver TIMEOUT got
+  the same permanent verdict even though a retry can work. `FetchError`
+  now carries `Dns`, `DnsTimeout` and `Ssrf` variants, the tool error
+  carries the code its variant declares, and the classifier reads that
+  code ahead of the prose, so the mapping cannot drift with wording
+  again. A resolver timeout is `transient` now, a private/loopback address
+  is still `guard.ssrf`, and the post-action navigation guard reports the
+  real failure instead of a hardcoded private/loopback verdict.
+
 ## [4.2.3] - 2026-09-19
 
 ### Changed

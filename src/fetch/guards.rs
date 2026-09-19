@@ -144,21 +144,21 @@ fn validate_url_basic_with_policy(
         .map_err(|_| crate::error::FetchError::InvalidUrl(url_str.into()))?;
     let scheme = url.scheme();
     if scheme != "http" && scheme != "https" {
-        return Err(crate::error::FetchError::Http(format!(
-            "blocked: scheme {scheme} not allowed : only http/https"
+        return Err(crate::error::FetchError::Ssrf(format!(
+            "scheme {scheme} not allowed : only http/https : blocked by design"
         )));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(crate::error::FetchError::Http(
-            "blocked: URL contains credentials : SSRF guard".into(),
+        return Err(crate::error::FetchError::Ssrf(
+            "URL contains credentials : SSRF guard".into(),
         ));
     }
     let host = url
         .host_str()
         .ok_or_else(|| crate::error::FetchError::InvalidUrl(url_str.into()))?;
     if is_ssrf_host(host) && !allow_private_egress {
-        return Err(crate::error::FetchError::Http(format!(
-            "blocked: {host} is a private/loopback address : SSRF guard (set DONSETCH_ALLOW_PRIVATE_EGRESS to override)"
+        return Err(crate::error::FetchError::Ssrf(format!(
+            "{host} is a private/loopback address : SSRF guard (set DONSETCH_ALLOW_PRIVATE_EGRESS to override)"
         )));
     }
     // Also check host_str for bracketed IPv6 that Url keeps brackets on? is_ssrf_host handles it.
@@ -213,24 +213,24 @@ pub async fn ensure_url_safe(url_str: &str) -> Result<url::Url, crate::error::Fe
             for addr in addrs {
                 any = true;
                 if is_ssrf_resolved_ip(&addr.ip()) {
-                    return Err(crate::error::FetchError::Http(format!(
-                        "blocked: {host} resolves to private/loopback address {} : SSRF guard (set DONSETCH_ALLOW_PRIVATE_EGRESS to override)",
+                    return Err(crate::error::FetchError::Ssrf(format!(
+                        "{host} resolves to private/loopback address {} : SSRF guard (set DONSETCH_ALLOW_PRIVATE_EGRESS to override)",
                         addr.ip()
                     )));
                 }
             }
             if !any {
-                return Err(crate::error::FetchError::Http(format!(
-                    "blocked: {host} DNS returned no addresses : fail-closed SSRF guard"
+                return Err(crate::error::FetchError::Dns(format!(
+                    "{host} resolved to no addresses"
                 )));
             }
             Ok(url)
         }
-        Ok(Err(e)) => Err(crate::error::FetchError::Http(format!(
-            "blocked: DNS resolution failed for {host}: {e} : fail-closed SSRF guard"
+        Ok(Err(e)) => Err(crate::error::FetchError::Dns(format!(
+            "could not resolve {host}: {e}"
         ))),
-        Err(_) => Err(crate::error::FetchError::Http(format!(
-            "blocked: DNS resolution timeout for {host} : fail-closed SSRF guard"
+        Err(_) => Err(crate::error::FetchError::DnsTimeout(format!(
+            "the resolver did not answer within 5s for {host}"
         ))),
     }
 }
@@ -585,10 +585,18 @@ mod tests {
         // This proves we do not swallow DNS errors for browser tier.
         let res = ensure_url_safe("https://this-host-does-not-exist-12345.invalid/").await;
         assert!(res.is_err(), "non-resolvable host must fail closed, got Ok");
-        let msg = res.unwrap_err().to_string().to_lowercase();
+        let err = res.unwrap_err();
+        // #248: fail closed, but as a NAME failure. This used to be an
+        // `Http` string ending in "fail-closed SSRF guard", which the tool
+        // classifier mapped back to `guard.ssrf`: an agent read a typo as
+        // a target forbidden by policy.
         assert!(
-            msg.contains("dns") || msg.contains("fail-closed") || msg.contains("blocked"),
-            "error must mention DNS/fail-closed, got: {msg}"
+            matches!(err, crate::error::FetchError::Dns(_)),
+            "a host that does not resolve is a DNS failure, got {err:?}"
+        );
+        assert!(
+            !format!("{err}").to_lowercase().contains("ssrf"),
+            "a resolution failure must not read as a policy block: {err}"
         );
     }
 

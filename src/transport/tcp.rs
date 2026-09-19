@@ -27,10 +27,15 @@ pub async fn happy_connect_with(
     let addrs: Vec<SocketAddr> =
         tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port)))
             .await
-            .map_err(|_| FetchError::Timeout)??
+            .map_err(|_| {
+                FetchError::DnsTimeout(format!(
+                    "the resolver did not answer within {}s for {host}",
+                    CONNECT_TIMEOUT.as_secs()
+                ))
+            })??
             .collect();
     if addrs.is_empty() {
-        return Err(FetchError::Http(format!("dns: no address for {host}")));
+        return Err(FetchError::Dns(format!("no address for {host}")));
     }
 
     // DNS pinning (SSRF): a hostname that resolves to a
@@ -47,8 +52,8 @@ pub async fn happy_connect_with(
             .filter(|a| crate::fetch::guards::is_ssrf_resolved_ip(&a.ip()))
             .collect();
         if blocked.len() == addrs.len() {
-            return Err(FetchError::Http(format!(
-                "dns: {host} resolves to a private/loopback address : SSRF guard"
+            return Err(FetchError::Ssrf(format!(
+                "{host} resolves to a private/loopback address : SSRF guard"
             )));
         }
         addrs
