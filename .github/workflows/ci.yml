@@ -257,6 +257,19 @@ jobs:
         run: cargo check --profile ci --all-targets ${{ matrix.features }} --target ${{ matrix.target }}
         timeout-minutes: 30
 
+      # Windows is the only place a Windows-shaped test can fail, and this
+      # lane has been compile-only since 6bb584e, so a test whose fixture
+      # happens not to exist on Windows could not turn anything red
+      # (2026-09-19: a new doctor test used a path-form command and failed
+      # only under a local Windows run; #261). PR cycles stay cheap here:
+      # master pushes, tags and the nightly run the suite, and since the
+      # release gate reads the CI conclusion for the tag's SHA, a Windows
+      # test failure blocks the mint instead of surfacing after it.
+      - name: Test (nextest, Windows core suite, non-PR)
+        if: matrix.name == 'windows-x86_64' && github.event_name != 'pull_request'
+        run: cargo nextest run --profile ci --cargo-profile ci --target ${{ matrix.target }} ${{ matrix.extra-args }}
+        timeout-minutes: 60
+
       # Windows: compile-check the release feature set without the
       # 305MB MSVC static link. Catches feature-gating typos and
       # ort-sys build-script breakage at merge time; the real link
