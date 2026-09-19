@@ -788,6 +788,19 @@ fn downstream(
     // Render markdown (frontmatter + blocks) then paginate.
     let mut full = render::render(meta, url, &kept, opts);
 
+    // Page identity, independent of this request: ALL blocks, neutral
+    // display options, none of the request-specific notices below. The
+    // history fingerprint is taken over this, because fingerprinting the
+    // answer rather than the page made two reads of one unchanged URL with
+    // different reading parameters look like a content change, and let one
+    // call's parameters become the baseline for the next.
+    let identity = render::render(
+        meta,
+        url,
+        &all_blocks.iter().collect::<Vec<_>>(),
+        &ExtractOptions::default(),
+    );
+
     // Engine notes first (PDF scan flags etc.) : they frame any
     // other trust signal that follows.
     for note in &notes {
@@ -918,7 +931,7 @@ fn downstream(
         quality,
         pdf_pages,
         images,
-        fingerprint: Some(crate::pages::history::PageHistory::fingerprint(&full)),
+        fingerprint: Some(crate::pages::history::PageHistory::fingerprint(&identity)),
         via: None,
     })
 }

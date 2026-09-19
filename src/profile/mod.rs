@@ -66,8 +66,14 @@ pub struct H2Profile {
 
 #[derive(Clone, Debug)]
 pub struct BrowserProfile {
+    /// The Chrome version this profile actually presents, e.g.
+    /// `chrome-153`. It names the version in use, not the version the
+    /// tables were captured from: --version, the scorecard label and the
+    /// recorded stealth baselines all read this field, and a label frozen
+    /// at the capture claimed chrome-150 for a build whose wire UA was
+    /// 153.
     #[allow(dead_code)]
-    pub name: &'static str,
+    pub name: String,
     pub tls: TlsProfile,
     pub h2: H2Profile,
     pub user_agent: String,
@@ -101,7 +107,7 @@ impl BrowserProfile {
             format!("\"Chromium\";v=\"{major}\", \"Not=A?Brand\";v=\"99\"")
         };
         Self {
-            name: "chrome-150",
+            name: format!("chrome-{major}"),
             tls: TlsProfile {
                 // 4865-4866-4867 then 49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53
                 ciphers_12: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
@@ -378,7 +384,7 @@ static PROBED: std::sync::OnceLock<Option<(u32, bool)>> = std::sync::OnceLock::n
 const PROBE_SPAWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// (major, google-chrome-branded).
-fn probe_installed() -> Option<(u32, bool)> {
+pub(crate) fn probe_installed() -> Option<(u32, bool)> {
     *PROBED.get_or_init(|| {
         if let Some((major, branded)) = probe_registry() {
             // The key family tells the brand truth directly.
@@ -621,6 +627,29 @@ pub(crate) fn parse_version_major(line: &str) -> Option<u32> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod profile_name_tests {
+    use super::{BrowserProfile, Platform};
+
+    /// The profile label must say which Chrome this profile actually
+    /// carries. The UA and the client hints have followed the detected
+    /// browser since v2.2, but the name stayed at the version the profile
+    /// was captured from, so --version, the scorecard label and every
+    /// recorded stealth baseline claimed chrome-150 for a build whose
+    /// wire UA was Chrome/153.
+    #[test]
+    fn name_tracks_the_chrome_major() {
+        assert_eq!(
+            BrowserProfile::chrome(153, Platform::Linux, true).name,
+            "chrome-153"
+        );
+        assert_eq!(
+            BrowserProfile::chrome(120, Platform::Linux, false).name,
+            "chrome-120"
+        );
+    }
 }
 
 #[cfg(test)]

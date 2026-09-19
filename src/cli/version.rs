@@ -28,7 +28,18 @@ pub async fn run() {
         "target",
         option_env!("DONSETCH_TARGET").unwrap_or("unknown"),
     );
-    cli::print_kv("profile", "chrome-150");
+    // The label must name the Chrome this build actually presents. The UA
+    // and the client hints follow the detected browser, so a literal here
+    // mislabelled every build (and every recorded stealth baseline) as the
+    // version the tables were captured from. When no browser can be
+    // detected the profile falls back to the capture version, and that is
+    // said out loud instead of presented as a fact about the host.
+    let profile = BrowserProfile::host_default();
+    let label = match crate::profile::probe_installed() {
+        Some(_) => format!("{} (detected)", profile.name),
+        None => format!("{} (fallback: no installed browser detected)", profile.name),
+    };
+    cli::print_kv("profile", &label);
     cli::print_kv(
         "features",
         option_env!("DONSETCH_FEATURES").unwrap_or("(none)"),

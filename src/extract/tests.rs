@@ -35,6 +35,46 @@ fn extract_html_opts(html: &str, opts: &ExtractOptions) -> Extracted {
 // 1. MULTI-LANGUAGE EXTRACTION
 // ════════════════════════════════════════════════════════════
 
+// ════════════════════════════════════════════════════════════
+// 0. PAGE IDENTITY vs REQUEST PARAMETERS
+// ════════════════════════════════════════════════════════════
+
+/// The history fingerprint must describe the PAGE, not the request.
+/// It used to be taken over the rendered, focus-filtered slice with
+/// the request's own notices prepended, so two reads of one unchanged
+/// page with different reading parameters looked like a content
+/// change: an agent alternating a focused and a full read of the same
+/// URL got "changed"/"rewritten" on every call, and the parameters of
+/// one call became the baseline for the next.
+#[test]
+fn fingerprint_describes_the_page_not_the_request() {
+    // Enough paragraphs that a focus match has to drop some, which is
+    // what emits the dropped-content manifest.
+    let body: String = (0..12)
+        .map(|i| format!("<p>Paragraph {i} about generic topics and filler text.</p>"))
+        .collect();
+    let html = format!(
+        "<!DOCTYPE html><html><head><title>Identity</title></head><body>\
+         <article><h1>Identity</h1>{body}\
+         <p>The needle marker paragraph talks about rotating a deque.</p>\
+         </article></body></html>"
+    );
+
+    let plain = extract_html_opts(&html, &ExtractOptions::default());
+    let mut opts = ExtractOptions::default();
+    opts.focus = Some("needle marker".into());
+    let focused = extract_html_opts(&html, &opts);
+
+    assert_ne!(
+        plain.markdown, focused.markdown,
+        "focus must still change what the caller sees"
+    );
+    assert_eq!(
+        plain.fingerprint, focused.fingerprint,
+        "the fingerprint must not move with the reading parameters"
+    );
+}
+
 #[test]
 fn extract_english_article() {
     let html = r#"<!DOCTYPE html>
