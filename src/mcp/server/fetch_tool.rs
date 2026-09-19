@@ -94,6 +94,55 @@ pub(super) async fn fetch_tool(
 
 /// Honest deadline error (v3 D1): the tool respects the agent's
 /// clock. What was fetched so far is described; nothing pretends.
+/// The verdict a FAILURE envelope reports.
+///
+/// The success path starts the verdict at ContentOk and a prewarm hit
+/// sets it too, so a failure envelope inherited "ContentOk" and
+/// contradicted the error beside it: a walled fetch reported
+/// `"verdict": "ContentOk"` with `"code": "wall.captcha"` (#258).
+///
+/// A failure never calls the fetch content. Any other verdict the run
+/// earned is kept, a challenge or a 404 included, and otherwise the
+/// failure names itself: `Blocked` for a wall, which is the word the
+/// error-code table already uses for `wall.*`, and `Unknown` for
+/// anything else.
+fn failure_verdict(current: &str, kind: &str) -> String {
+    if current != "ContentOk" {
+        return current.to_string();
+    }
+    match kind {
+        "walled" => "Blocked".to_string(),
+        _ => "Unknown".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod failure_verdict_tests {
+    use super::failure_verdict;
+
+    #[test]
+    fn a_failure_never_reports_content_ok() {
+        // #258: a walled fetch reported `"verdict": "ContentOk"` beside
+        // `"code": "wall.captcha"`. ContentOk is the success path's
+        // default, and no failure may inherit it.
+        assert_eq!(failure_verdict("ContentOk", "walled"), "Blocked");
+        assert_eq!(failure_verdict("ContentOk", "permanent"), "Unknown");
+        assert_eq!(failure_verdict("ContentOk", "transient"), "Unknown");
+    }
+
+    #[test]
+    fn a_failure_keeps_a_verdict_the_run_actually_earned() {
+        // Tier 1 hit the wall and the ghost could not clear it: the
+        // challenge is what happened, and it stays reported rather than
+        // being flattened to Blocked.
+        assert_eq!(
+            failure_verdict("Challenge(Cloudflare)", "walled"),
+            "Challenge(Cloudflare)"
+        );
+        assert_eq!(failure_verdict("SoftNotFound", "permanent"), "SoftNotFound");
+    }
+}
+
 pub(super) async fn resolve_fetch_url(daemon: &Arc<Daemon>, raw: &str) -> Result<String, Value> {
     if raw.starts_with("http://") || raw.starts_with("https://") {
         return Ok(raw.to_string());
@@ -1293,13 +1342,14 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
                 {
                     return v3;
                 }
+                let failed_verdict = failure_verdict(&final_verdict, kind);
                 return tool_error_structured(
                     msg,
                     kind,
                     Some(json!({
                         "url": url,
                         "status": final_status,
-                        "verdict": final_verdict,
+                        "verdict": failed_verdict,
                         "next_action": next_action_for(out.as_ref().map(|o| o.verdict), final_status, kind),
                         "escalation": trace.value(),
                     })),
@@ -1712,6 +1762,20 @@ pub(super) async fn ghost_escalate(
                 page = p2;
             }
             Some(p2) if p2.captcha => {
+                // A failed second pass must leave the same trail a
+                // successful one does. The debug log showed two
+                // attempts while the escalation listed one, so the
+                // trail implied the wall had been met once (#258).
+                trace.step(
+                    "2",
+                    "solve-pass2",
+                    &format!(
+                        "still walled: captcha={} dom={}KB",
+                        p2.captcha,
+                        p2.html.len() / 1024
+                    ),
+                    t1b.elapsed().as_millis(),
+                );
                 if let Some(p) = shot {
                     let _ = g.screenshot(p).await;
                 }

@@ -1912,6 +1912,14 @@ const RESERVED_VARS: &[&str] = &[
     "DONSETCH_SKIP_DOWNLOAD",
     "DONSETCH_FORCE_GLIBC",
     "BLESS_MCP_FIXTURES",
+    // Build metadata baked by build.rs. cargo passes these in the env it
+    // runs the binary with, so `cargo run` printed "ignoring
+    // DONSETCH_FEATURES: expected DONSETCH_<SECTION>__<KEY>" for each
+    // one. They are not knobs and never were (#258).
+    "DONSETCH_FEATURES",
+    "DONSETCH_GIT_HASH",
+    "DONSETCH_PDFIUM",
+    "DONSETCH_TARGET",
 ];
 
 const LEGACY_VARS: &[&str] = &[
@@ -3707,6 +3715,40 @@ mod tests {
         }
         assert_eq!(boolish("maybe"), None);
         assert_eq!(boolish(""), None);
+    }
+
+    #[test]
+    fn build_metadata_env_vars_are_not_config_knobs() {
+        // `cargo run` puts build.rs' cargo:rustc-env values into the
+        // environment it runs the binary with, so the config layer used
+        // to print "ignoring DONSETCH_FEATURES: expected
+        // DONSETCH_<SECTION>__<KEY>" for each one (#258). They carry no
+        // section and no key, and they never were knobs.
+        let (map, warnings, errors) = new_env_layer_from([
+            (
+                std::ffi::OsString::from("DONSETCH_FEATURES"),
+                std::ffi::OsString::from("ocr,rerank,http"),
+            ),
+            (
+                std::ffi::OsString::from("DONSETCH_GIT_HASH"),
+                std::ffi::OsString::from("deadbeefcafe"),
+            ),
+            (
+                std::ffi::OsString::from("DONSETCH_PDFIUM"),
+                std::ffi::OsString::from("bundled, v1"),
+            ),
+            (
+                std::ffi::OsString::from("DONSETCH_TARGET"),
+                std::ffi::OsString::from("x86_64-unknown-linux-gnu"),
+            ),
+        ]);
+
+        assert!(map.is_empty(), "build metadata is not a setting");
+        assert!(
+            warnings.is_empty(),
+            "no warning may name build metadata: {warnings:?}"
+        );
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     #[cfg(unix)]
