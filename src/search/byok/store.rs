@@ -113,22 +113,110 @@ impl ByokConfig {
         }
     }
 
-    /// Load from disk. Returns empty config if file missing
-    /// or corrupt (with a warning to stderr).
+    /// Load from disk.
+    ///
+    /// A file that is missing or not JSON at all degrades to an empty
+    /// config with a warning. Inside a well-formed file the tolerance
+    /// is per key entry: an entry the schema rejects is dropped and
+    /// named, and every other key still works. Discarding the whole
+    /// store for one bad word cost an operator every provider at once
+    /// and then read as "donsetch has no provider fallback"
+    /// (2026-09-18: a hand-edited `"state": "dead"`, which was the
+    /// word the CLI used to print for that state).
     pub fn load() -> Self {
         let Some(path) = config_path() else {
             return Self::empty();
         };
-        match std::fs::read_to_string(&path) {
-            Ok(raw) => match serde_json::from_str(&raw) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("[byok] warning: corrupt key file ({e}), ignoring");
-                    Self::empty()
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(_) => return Self::empty(),
+        };
+        let value: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "[byok] warning: key file {} is not valid JSON ({e}), ignoring",
+                    path.display()
+                );
+                return Self::empty();
+            }
+        };
+        Self::from_value(value, &path)
+    }
+
+    /// Tolerant decode: keep every entry the schema accepts, name
+    /// every entry it does not, and never let one entry take the
+    /// others down with it.
+    fn from_value(value: serde_json::Value, path: &std::path::Path) -> Self {
+        let Some(obj) = value.as_object() else {
+            eprintln!(
+                "[byok] warning: key file {} is not a JSON object, ignoring",
+                path.display()
+            );
+            return Self::empty();
+        };
+        let default = obj
+            .get("default")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
+        let mut providers: Vec<ProviderConfig> = Vec::new();
+        for (i, entry) in obj
+            .get("providers")
+            .and_then(|p| p.as_array())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let name = entry
+                .as_object()
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            if name.is_empty() {
+                eprintln!(
+                    "[byok] warning: providers[{i}] in {} has no name, skipping that entry",
+                    path.display()
+                );
+                continue;
+            }
+            let Some(raw_keys) = entry
+                .as_object()
+                .and_then(|p| p.get("keys"))
+                .and_then(|k| k.as_array())
+            else {
+                eprintln!(
+                    "[byok] warning: provider {name} in {} has no keys array, skipping that entry",
+                    path.display()
+                );
+                continue;
+            };
+            let mut keys: Vec<KeyEntry> = Vec::new();
+            for (j, k) in raw_keys.iter().enumerate() {
+                match serde_json::from_value::<KeyEntry>(k.clone()) {
+                    // Same rule `validate()` applies on the write path:
+                    // an empty key can never authenticate, so keeping it
+                    // would only move the confusion one step along.
+                    Ok(k) if k.key.trim().is_empty() => eprintln!(
+                        "[byok] warning: {name} keys[{j}] in {} has an empty key, \
+                         skipping that key",
+                        path.display()
+                    ),
+                    Ok(k) => keys.push(k),
+                    Err(e) => eprintln!(
+                        "[byok] warning: {name} keys[{j}] in {} rejected ({e}), \
+                         skipping that key; every other key is kept",
+                        path.display()
+                    ),
                 }
-            },
-            Err(_) => Self::empty(),
+            }
+            providers.push(ProviderConfig {
+                name: name.to_string(),
+                keys,
+            });
         }
+        Self { default, providers }
     }
 
     /// Save to disk with restrictive permissions (0600).
@@ -958,5 +1046,154 @@ mod tests {
     fn from_json_rejects_malformed() {
         assert!(ByokConfig::from_json("not json").is_err());
         assert!(ByokConfig::from_json("{}").is_err());
+    }
+
+    // ── tolerant load (what a hand-edited file gets) ───────────
+
+    static CACHE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// A throwaway cache dir with `DONSETCH_CACHE_DIR` pointed at it.
+    /// `cache_dir()` reads the env per call, and nextest runs one
+    /// process per test, so this is race-free here.
+    fn throwaway_cache(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "donsetch-byok-store-{tag}-{}-{}",
+            std::process::id(),
+            CACHE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        unsafe { std::env::set_var("DONSETCH_CACHE_DIR", &dir) };
+        dir
+    }
+
+    #[test]
+    fn a_rejected_key_entry_does_not_discard_the_other_keys() {
+        // 2026-09-18, live: a hand-edited `"state": "dead"`, which was
+        // the word the CLI printed for that state, made the loader
+        // discard the WHOLE store. A healthy serper key vanished with
+        // the bad tavily entry, and the keyless answer was read as
+        // "donsetch has no provider fallback".
+        let dir = throwaway_cache("one-bad");
+        std::fs::write(
+            dir.join("byok-keys.json"),
+            r#"{
+              "default": "serper",
+              "providers": [
+                {"name": "serper", "keys": [{"key": "FAKE-SERPER", "state": "active", "ts": 0}]},
+                {"name": "tavily", "keys": [{"key": "FAKE-TAVILY", "state": "dead", "ts": 0}]}
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let cfg = ByokConfig::load();
+        assert_eq!(cfg.default, "serper", "the default must survive");
+        let serper = cfg
+            .providers
+            .iter()
+            .find(|p| p.name == "serper")
+            .expect("the healthy provider must survive a bad sibling entry");
+        assert_eq!(serper.keys.len(), 1);
+        assert_eq!(serper.keys[0].state, KeyState::Active);
+        let tavily = cfg
+            .providers
+            .iter()
+            .find(|p| p.name == "tavily")
+            .expect("the provider entry itself is kept");
+        assert!(
+            tavily.keys.is_empty(),
+            "only the rejected key is dropped, not the provider"
+        );
+    }
+
+    #[test]
+    fn an_empty_key_is_dropped_and_the_rest_survive() {
+        // `validate()` rejects an empty key on the write path, so the
+        // read path must not quietly accept one.
+        let dir = throwaway_cache("empty-key");
+        std::fs::write(
+            dir.join("byok-keys.json"),
+            r#"{"default":"tavily","providers":[
+                 {"name":"tavily","keys":[
+                   {"key":"   ","state":"active","ts":0},
+                   {"key":"tvly-real","state":"active","ts":0}
+                 ]}
+               ]}"#,
+        )
+        .unwrap();
+
+        let cfg = ByokConfig::load();
+        let tavily = cfg.providers.iter().find(|p| p.name == "tavily").unwrap();
+        assert_eq!(tavily.keys.len(), 1, "the real key is kept");
+        assert_eq!(tavily.keys[0].key, "tvly-real");
+    }
+
+    #[test]
+    fn a_provider_without_keys_is_skipped_and_the_rest_survive() {
+        let dir = throwaway_cache("no-keys-array");
+        std::fs::write(
+            dir.join("byok-keys.json"),
+            r#"{"default":"serper","providers":[
+                 {"name":"broken"},
+                 {"name":"serper","keys":[{"key":"serp-real","state":"active","ts":0}]}
+               ]}"#,
+        )
+        .unwrap();
+
+        let cfg = ByokConfig::load();
+        assert_eq!(cfg.providers.len(), 1);
+        assert_eq!(cfg.providers[0].name, "serper");
+        assert_eq!(cfg.providers[0].keys[0].key, "serp-real");
+    }
+
+    #[test]
+    fn a_file_that_is_not_json_still_degrades_to_empty() {
+        // The one case that has to stay total: nothing in the file can
+        // be trusted, so nothing is read from it.
+        let dir = throwaway_cache("not-json");
+        std::fs::write(dir.join("byok-keys.json"), "this is not json").unwrap();
+        assert!(ByokConfig::load().providers.is_empty());
+
+        let dir = throwaway_cache("array-not-object");
+        std::fs::write(dir.join("byok-keys.json"), "[1,2,3]").unwrap();
+        assert!(ByokConfig::load().providers.is_empty());
+    }
+
+    #[test]
+    fn a_valid_file_loads_identically_through_the_tolerant_path() {
+        // Regression guard: the tolerant decoder must not drop,
+        // reorder or rewrite anything on a file this build wrote
+        // itself, including the states the CLI sets.
+        let _dir = throwaway_cache("roundtrip");
+        let mut written = ByokConfig::empty();
+        written.add_key("tavily", "tvly-a");
+        written.add_key("serper", "serp-b");
+        written
+            .providers
+            .iter_mut()
+            .find(|p| p.name == "tavily")
+            .unwrap()
+            .keys[0]
+            .state = KeyState::CreditDepleted;
+        written.save();
+
+        let loaded = ByokConfig::load();
+        assert_eq!(loaded.default, written.default);
+        assert_eq!(loaded.providers.len(), written.providers.len());
+        for (a, b) in written.providers.iter().zip(loaded.providers.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.keys.len(), b.keys.len());
+            for (ka, kb) in a.keys.iter().zip(b.keys.iter()) {
+                assert_eq!(ka.key, kb.key);
+                assert_eq!(ka.state, kb.state);
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_file_is_still_empty() {
+        let _dir = throwaway_cache("missing");
+        assert!(ByokConfig::load().providers.is_empty());
     }
 }
