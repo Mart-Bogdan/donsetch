@@ -262,6 +262,13 @@ impl ByokSearcher {
         // loop without this set.
         let mut tried: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
+        // One lane per attempted provider, in walk order, so `_meta`
+        // answers "which providers were tried, and how did each one
+        // end" rather than only "who answered". A caller could not
+        // tell "Tavily is the default" from "Serper was asked first
+        // and came back empty", and a monitor built on the report
+        // paged a provider change that never happened (#253).
+        let mut walk: Vec<EngineReport> = Vec::new();
 
         loop {
             attempts += 1;
@@ -288,13 +295,17 @@ impl ByokSearcher {
             // Dispatch to the provider adapter. Both arms
             // normalize to `ProviderFailure`: a plugin brings its own
             // words, a native adapter's text is what its variant
-            // already renders.
+            // already renders. Timed here rather than inside the
+            // adapter so a walked-past lane reports the wall time it
+            // cost this call, whether it failed or came back empty.
+            let attempt_started = Instant::now();
             let result: Result<ProviderOutcome, ProviderFailure> = match plugin_def {
                 Some(def) => plugin::run_plugin(&provider, &def, query, max, &intent).await,
                 None => dispatch(&self.client, &provider, &key, query, max, &intent)
                     .await
                     .map_err(ProviderFailure::of),
             };
+            let attempt_ms = attempt_started.elapsed().as_millis() as u64;
 
             match result {
                 Ok(outcome) => {
@@ -307,10 +318,19 @@ impl ByokSearcher {
                         if crate::config::cfg().debug.search {
                             eprintln!("[byok] {provider} returned 0 results, trying next");
                         }
+                        walk.push(EngineReport {
+                            engine: provider.clone(),
+                            profile: None,
+                            status: "empty".into(),
+                            hits: 0,
+                            ms: attempt_ms,
+                            egress: "byok".into(),
+                        });
                         continue;
                     }
                     let results = to_merged(outcome.hits, &provider, max);
-                    let report = vec![EngineReport {
+                    let mut report = std::mem::take(&mut walk);
+                    report.push(EngineReport {
                         engine: provider.clone(),
                         profile: None,
                         status: if outcome.degraded {
@@ -321,7 +341,7 @@ impl ByokSearcher {
                         hits: results.len(),
                         ms: outcome.ms,
                         egress: "byok".into(),
-                    }];
+                    });
                     return Ok(SearchOutcome {
                         results,
                         weak: false,
@@ -349,6 +369,23 @@ impl ByokSearcher {
                     }
 
                     last_error = format!("{provider}: {shown}");
+
+                    // The lane this attempt occupied, named by how it
+                    // actually ended: a rate-limited key or plugin is
+                    // the transient case, everything else here is an
+                    // error the caller can see in `_meta`.
+                    walk.push(EngineReport {
+                        engine: provider.clone(),
+                        profile: None,
+                        status: match failure.key.to_key_state() {
+                            Some(KS::RateLimited) => "rate_limited",
+                            _ => "error",
+                        }
+                        .into(),
+                        hits: 0,
+                        ms: attempt_ms,
+                        egress: "byok".into(),
+                    });
 
                     // Update key state if this is a key-level error.
                     // A plugin's credentials live inside the plugin,
@@ -787,5 +824,83 @@ mod tests {
             on_disk.contains("\"active\""),
             "a legacy envelope must record no state: {on_disk}"
         );
+    }
+
+    /// Register plugins from `(name, sh -c script)` pairs, in order.
+    #[cfg(unix)]
+    fn register_plugins(plugins: &[(&str, &str)]) {
+        let mut cfg = plugin::PluginConfig::empty();
+        for (name, script) in plugins {
+            cfg.add(
+                name,
+                vec!["/bin/sh".into(), "-c".into(), (*script).to_string()],
+                10_000,
+                &std::collections::HashSet::new(),
+            )
+            .unwrap();
+        }
+        cfg.save();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_report_names_every_provider_walked_past() {
+        // #253: `_meta` listed only the provider that answered, so a
+        // caller could not tell "second is the default" from "first
+        // was asked first and came back empty", and a monitor built
+        // on the report paged a provider change that never happened.
+        let _dir = throwaway_cache("walk-empty");
+        register_plugins(&[
+            ("first", r#"echo '{"format":1,"results":[]}'"#),
+            (
+                "second",
+                r#"echo '{"format":1,"results":[{"title":"t","url":"https://example.com/a"}]}'"#,
+            ),
+        ]);
+
+        let outcome = ByokSearcher::new()
+            .search("q", 5, Some(Intent::Web))
+            .await
+            .expect("the second provider answers");
+
+        assert_eq!(outcome.provider.as_deref(), Some("second"));
+        assert_eq!(outcome.report.len(), 2, "both attempts are lanes");
+        assert_eq!(outcome.report[0].engine, "first");
+        assert_eq!(outcome.report[0].status, "empty");
+        assert_eq!(outcome.report[0].hits, 0);
+        assert_eq!(outcome.report[0].egress, "byok");
+        assert_eq!(outcome.report[1].engine, "second");
+        assert_eq!(outcome.report[1].status, "ok");
+        assert_eq!(outcome.report[1].hits, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_walked_past_provider_is_named_by_how_it_failed() {
+        let _dir = throwaway_cache("walk-error");
+        register_plugins(&[
+            (
+                "throttled",
+                r#"echo '{"format":1,"error":"429 too many requests","error_kind":"rate_limited"}'; exit 1"#,
+            ),
+            (
+                "second",
+                r#"echo '{"format":1,"results":[{"title":"t","url":"https://example.com/b"}]}'"#,
+            ),
+        ]);
+
+        let outcome = ByokSearcher::new()
+            .search("q", 5, Some(Intent::Web))
+            .await
+            .expect("the second provider answers");
+
+        assert_eq!(outcome.report.len(), 2);
+        assert_eq!(outcome.report[0].engine, "throttled");
+        assert_eq!(
+            outcome.report[0].status, "rate_limited",
+            "a throttled provider is the transient case, not a generic error"
+        );
+        assert_eq!(outcome.report[0].hits, 0);
+        assert_eq!(outcome.report[1].status, "ok");
     }
 }
