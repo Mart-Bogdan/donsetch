@@ -1018,17 +1018,33 @@ impl Ghost {
                 .await;
         }
 
-        // Unknown platform fallback: headless mode with device
-        // metrics override (no real screen geometry available).
-        // Also applied when the persona pins a non-default viewport
-        // so window-size and the layout viewport cannot disagree.
+        // The layout viewport is pinned whenever the renderer has no real
+        // window geometry to lay out against: a headless launch (selected
+        // by config, or the no-display fallback, or the unknown-platform
+        // arm) has no window at all.
+        //
+        // Measured on bare Xvfb with no window manager: a headless launch
+        // laid the page out at 0x0, window.innerWidth/innerHeight were
+        // 0x0, and document.elementFromPoint(x, y) returned null at EVERY
+        // point, so no click could land on anything, a Turnstile checkbox
+        // included. It stayed invisible for as long as it did because
+        // extraction still works: the DOM is there and the wall oracle
+        // reads it fine, so only the paths that have to click were broken.
+        //
+        // A headful launch is left alone. Its window really is the size
+        // the persona asked for, so pinning screen.width to the viewport
+        // would be a needless difference from a real browser on a larger
+        // screen. A persona that pins a non-default viewport is pinned
+        // too, so window-size and the layout viewport cannot disagree.
         {
             let (vw, vh) = wire.viewport;
-            let needs_metrics = cfg!(not(any(
-                linux_like,
-                target_os = "macos",
-                target_os = "windows"
-            ))) || wire.viewport != (1920, 1080);
+            #[cfg(linux_like)]
+            let headless_launch = force_headless || display.is_none();
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            let headless_launch = force_headless;
+            #[cfg(not(any(linux_like, target_os = "macos", target_os = "windows")))]
+            let headless_launch = true;
+            let needs_metrics = headless_launch || wire.viewport != (1920, 1080);
             if needs_metrics {
                 cdp.call(
                     Some(&session),

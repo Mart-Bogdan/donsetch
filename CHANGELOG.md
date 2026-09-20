@@ -5,6 +5,39 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- The Turnstile click aims at the widget now, and it survives the widget
+  rendering late. Three defects in that path, each one measured on a live
+  widget (Turnstile's interactive test sitekey `3x00000000000000000000FF`,
+  which renders a real checkbox on a local page):
+  - In `solve`, a click that could not be aimed still spent the pass's one
+    click. The widget script is async and the first poll has no
+    `cf-turnstile-response` input at all, so that click went to a
+    hardcoded point and the pass then stopped trying before the thing it
+    was aiming at existed. An unaimed click no longer spends an attempt;
+    the fixed-point guess is still allowed once, as a last resort.
+  - The lookup refused any element with a zero-width box. A real widget
+    box does collapse to zero width once Cloudflare has taken the
+    container over (measured `x=32 y=372 w=0 h=68`) while the widget
+    still renders at that box's left edge, so the refusal sent the click
+    to a fixed point on the page. The same width also fed the 22px
+    checkbox inset (`min(22, w/2)`), which collapsed to a 0px inset on
+    that box, aiming at the widget's border. The lookup now walks the
+    real widget structure, requires only a height, and keeps the inset.
+  - A headless launch laid the page out at 0x0. The layout viewport was
+    pinned only for an unknown platform or a non-default persona
+    viewport, so a headless browser on Linux got no metrics override and
+    a launch with no window laid the page out at zero size: measured
+    `window.innerWidth`/`innerHeight` 0x0 and
+    `document.elementFromPoint(x, y)` returning null at EVERY point, with
+    nothing able to land on the checkbox. Extraction never showed it (the
+    DOM is still there and the wall oracle reads it), which is why only
+    clicking was broken. A headless launch pins the layout to the persona
+    viewport now; a headful launch is untouched, since its window really
+    is that size.
+
 ## [4.2.7] - 2026-09-20
 
 ### Changed
