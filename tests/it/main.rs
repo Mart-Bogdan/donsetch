@@ -12,6 +12,7 @@ mod bypass_live;
 mod crawl_fresh_fetch;
 mod daemon_boot_stays_alive;
 mod egress_proxy;
+mod mcp_tool_call_does_not_abort;
 mod request_class;
 mod revalidate_redirect;
 mod secure_cookie_leak;

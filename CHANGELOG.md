@@ -39,7 +39,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `web_screenshot`. Harmless where a client does keep the blocks apart: a
   trailing blank line is trimmed on render, and OpenCode already joins text
   blocks with `\n\n` of its own, so there it doubles a separator that was
-  going to be there anyway and still reads as one paragraph break.
+  going to be there anyway and still reads as one paragraph break
+  (Mart-Bogdan).
+- The MCP server no longer dies on a stack overflow in a debug build. Tokio
+  gives runtime worker threads 2 MiB of stack and the MCP server runs every
+  tool call on one, while the fetch path needs more than that unoptimized:
+  measured on the `fast` profile, 2 MiB and 2.5 MiB both overflowed and
+  2.75 MiB was the first size that passed. A stack overflow is an abort with
+  no error envelope, so `donsetch mcp` killed the whole session on the first
+  fetch while the same fetch through the CLI was fine, because the CLI runs
+  on the 8 MiB main thread. Workers now get 8 MiB, the same as the main
+  thread. The released binary was never affected (the same path needs under
+  256 KiB there), so this is a development-loop fix, and it carries an
+  integration test that drives the real binary over stdio and goes red if
+  the worker stack is left at the default.
+- The handle-shape test no longer reads the process-wide config. It asserted
+  `is_handle(...)` unconditionally, and `is_handle` returns false when
+  `mcp.url_handles` is off, so on any machine where handles are disabled in
+  the real config the test failed for a reason that had nothing to do with
+  the code. The shape rules are asserted against `is_valid_handle_id` now,
+  and the gate is asserted against the knob's own value, so it holds either
+  way (Mart-Bogdan, #263).
 
 ## [4.2.6] - 2026-09-19
 

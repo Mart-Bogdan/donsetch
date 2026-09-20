@@ -66,8 +66,37 @@ fn config_cli(args: &[String]) {
     }
 }
 
-#[tokio::main]
-async fn main() {
+/// Stack size for the runtime's worker threads.
+///
+/// Tokio gives workers 2 MiB by default, and the MCP server runs every
+/// tool call on one of them. The fetch path needs more than that in an
+/// unoptimized build: measured on the `fast` profile, 2 MiB and 2.5 MiB
+/// both overflowed and the first size that passed was 2.75 MiB. An
+/// overflow is an abort with no error envelope, which is the worst
+/// failure a caller can get: `donsetch mcp` killed the whole session on
+/// the first fetch while the same fetch through the CLI was fine, because
+/// the CLI runs on the 8 MiB main thread. Workers get what the main thread
+/// already has, so the same work cannot be fine on one path and fatal on
+/// the other. Reserved, not committed: the pages are only touched as they
+/// are used.
+const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+fn main() {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK_BYTES)
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("donsetch: cannot start the async runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+    rt.block_on(run());
+}
+
+async fn run() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("help");
 
@@ -137,7 +166,6 @@ async fn main() {
         // ── Management ──
         "config" => {
             config_cli(&args);
-            return;
         }
         "mcp" => {
             // Transport selection: the --http flag wins, then the
