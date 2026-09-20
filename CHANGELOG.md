@@ -37,6 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     clicking was broken. A headless launch pins the layout to the persona
     viewport now; a headful launch is untouched, since its window really
     is that size.
+- `deadline_ms` reaches the browser passes. Every pass was fixed at 20s
+  (25s on the actions path) and ignored the caller's budget, so a call with
+  a short deadline was cut off mid-pass by the clock that wraps the call: it
+  answered `deadline.hit` with no wall verdict, even where the pass had
+  already seen the wall, and the browser kept working on a pass nobody was
+  waiting for. A pass is bounded by what is left of the budget now, floored
+  at 3s and capped at the old default, so no pass can get longer than before
+  and a caller who sets no deadline still gets the fixed pass. One honest
+  limit: a deadline hit still reports no trail, because the escalation
+  built so far is discarded with the cancelled pass, and that needs its own
+  change.
 
 ## [4.2.7] - 2026-09-20
 
