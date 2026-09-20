@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The macos-x86_64 lane runs the smoke suite instead of nothing, so no lane
+  in the matrix is test-free any more. It was the slowest runner and the only
+  one running no binaries: its full-suite run died at the step timeout
+  mid-compile, and ten separate integration-test links were the cost that
+  made it unaffordable. With the integration tests consolidated into one
+  binary that link is a tenth of what it was, so the lane runs the same
+  smoke set macos-arm64 runs (process spawn and restart policy, paths,
+  profile detection, extraction) and macOS-exclusive code gets a second
+  architecture's worth of exercise.
+
 ### Fixed
 - The Turnstile click aims at the widget now, and it survives the widget
   rendering late. Three defects in that path, each one measured on a live

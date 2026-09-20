@@ -110,11 +110,21 @@ jobs:
             features: ''
             extra-args: ''
             release-check: false
-            # The slowest runner in the matrix: it compiles and links
-            # every target (clippy --all-targets) but runs no binaries.
-            # Its full-suite run was the one that died at the 30 minute
-            # step timeout mid-compile.
-            tests: none
+            # The slowest runner in the matrix, and the only one that used
+            # to run no binaries at all: its full-suite run died at this
+            # step's 30 minute timeout mid-compile, so the lane was left as
+            # a compile-check. It runs the SMOKE set now, not the full
+            # suite: the platform-exclusive surface is thin and macos-arm64
+            # already covers it (process spawn + restart policy, paths,
+            # profile detection, extraction), so what this adds is that the
+            # Intel arch stops being test-free, and macOS-exclusive code
+            # gets a second architecture's worth of exercise.
+            #
+            # Affordable now because the integration tests are one binary
+            # instead of ten (the ten MSVC/macOS links were the cost that
+            # made this lane's suite unaffordable), which is why it is
+            # being tried again rather than left as it was.
+            tests: smoke
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
