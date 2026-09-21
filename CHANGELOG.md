@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- A tier-2 render no longer waits a fixed four seconds on pages that
+  cannot hydrate. The SPA hydration guard floored every DOM under 50 KB
+  at four seconds before the content oracle could settle, and a document
+  with no `<script` at all cannot grow its DOM after load, so the floor
+  there was pure latency. Scriptless small pages settle on the content
+  oracle alone now; every page that can hydrate late keeps the guard
+  unchanged (a scripted page under `--tier 2` measures the same as
+  before). `example.com --tier 2`: 4.77s to 0.95s median in a warm
+  daemon, 5.58s to 2.02s through the CLI, where the cold browser launch
+  is the rest.
+- The browser display starts on first use instead of at pipeline boot.
+  Constructing the fetch pipeline started or adopted Xvfb and ran
+  `which Xvfb`, `which xdpyinfo` and an `xdpyinfo` connect before the
+  first fetch, so a tier-1-only CLI run paid three child processes and
+  an X11 connect for a browser it would never launch. The display now
+  initializes on the first browser acquire; tier-1-only runs spawn
+  nothing.
+- A fetch lane for a new host is chosen by measured RTT among clean
+  lanes. With a proxy pool configured, every equally-clean lane scored
+  the same and the first lane in `proxies.txt` won for every new host,
+  so a fast lane could never displace a slow one. The lowest measured
+  RTT wins now; file order remains the tie-break while no measurements
+  exist.
+- The `chromium --version` probe is cached across processes, keyed by
+  the binary's identity (path, mtime, size). The probe spawned the
+  browser once per process and the CLI is one process per fetch, so
+  every CLI fetch paid it. An updated browser re-probes because its
+  identity changed. Receipt: two consecutive CLI fetches on one cache
+  directory, the second spawns zero browsers.
+
 ### Fixed
 - `robots.txt` rules with `*` or a trailing `$` (`Disallow: /*.pdf$`,
   `Disallow: /*?`, `Disallow: /private*/`) were matched as literal

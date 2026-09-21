@@ -311,6 +311,23 @@ pub struct GhostPage {
     pub took: Duration,
 }
 
+/// Settle floor for small DOMs: the SPA hydration guard.
+///
+/// SPAs download, parse and execute their bundles asynchronously: a
+/// stable small DOM early in the load is a shell, not a page, so it is
+/// floored at 4s before the content oracle may settle. A document that
+/// carries no `<script` at all cannot hydrate : nothing can grow its DOM
+/// after load : and the floor there is pure latency (example.com is
+/// 559B with zero scripts, complete at t=0). Large DOMs are already
+/// rendered and keep no floor. `lower` is the poll's lowercased HTML.
+fn small_dom_settle_floor(cur_len: usize, lower: &str) -> Duration {
+    if cur_len < 50_000 && lower.contains("<script") {
+        Duration::from_secs(4)
+    } else {
+        Duration::ZERO
+    }
+}
+
 /// Unified tier-2 fetch. Success oracle = CONTENT QUALITY,
 /// not wall-clear:
 ///
@@ -532,11 +549,7 @@ pub async fn ghost_fetch(
             continue;
         }
         let stable = prev_len > 0 && cur_len.abs_diff(prev_len) < cur_len / 100 + 64;
-        let min_settle = if cur_len < 50_000 {
-            Duration::from_secs(4)
-        } else {
-            Duration::ZERO
-        };
+        let min_settle = small_dom_settle_floor(cur_len, &lower);
         let past_min = start.elapsed() >= min_settle;
         if substantive && stable && past_min {
             settle_streak += 1;
@@ -783,5 +796,26 @@ mod ghost_fetch_tests {
     fn visible_text_shell_is_tiny() {
         let html = r#"<html><head><script src="app.js"></script></head><body><div id="root"></div></body></html>"#;
         assert!(visible_text_len(html) < 10);
+    }
+
+    #[test]
+    fn settle_floor_scriptless_small_page_is_zero() {
+        let html = "<html><head><title>Example Domain</title></head><body><h1>Example Domain</h1><p>Illustrative example.</p></body></html>";
+        assert_eq!(super::small_dom_settle_floor(559, html), Duration::ZERO);
+    }
+
+    #[test]
+    fn settle_floor_scripted_small_dom_keeps_the_hydration_guard() {
+        let html = r#"<html><head><script src="app.js"></script></head><body><div id="root"></div></body></html>"#;
+        assert_eq!(
+            super::small_dom_settle_floor(8_000, html),
+            Duration::from_secs(4)
+        );
+    }
+
+    #[test]
+    fn settle_floor_large_dom_settles_fast() {
+        let html = "<html><head><script>1</script></head><body></body></html>";
+        assert_eq!(super::small_dom_settle_floor(120_000, html), Duration::ZERO);
     }
 }
