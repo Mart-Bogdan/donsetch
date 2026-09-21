@@ -20,6 +20,7 @@ pub mod junk;
 pub mod language;
 pub mod math;
 pub mod metadata;
+pub mod nesting;
 pub mod reddit;
 pub mod render;
 pub mod score;
@@ -493,6 +494,12 @@ pub fn extract(
     // --- HTML upstream ---
     let html_text = charset::decode(body, &ct);
     let raw_len = body.len();
+    if nesting::max_nesting(&html_text) > nesting::MAX_NESTING {
+        return Err(ExtractError::Failed(format!(
+            "markup nested deeper than {} levels: not a document",
+            nesting::MAX_NESTING
+        )));
+    }
 
     // Reddit dedicated extractor: bypasses DonSift for
     // old.reddit.com, produces compact structured output.
