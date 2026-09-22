@@ -173,7 +173,7 @@ pub(crate) fn compact_failure(err: &str) -> String {
         .strip_prefix(&format!("plugin {provider}: "))
         .unwrap_or(detail);
     let short: String = detail
-        .split([',', ';', ':'])
+        .split([',', ';'])
         .next()
         .unwrap_or(detail)
         .trim()
@@ -996,18 +996,20 @@ mod tests {
             compact_failure(
                 "all providers exhausted after 20 attempts: tavily: HTTP 500: upstream"
             ),
-            "tavily HTTP 500"
+            "tavily HTTP 500: upstream"
         );
         assert_eq!(
             compact_failure("all keys exhausted: serper: empty results"),
             "serper empty results"
         );
-        // A plugin detail that echoes its own name is trimmed.
+        // A plugin detail that echoes its own name is trimmed, and
+        // an inner "status: N" survives (only commas/semicolons
+        // bound the clause).
         assert_eq!(
             compact_failure(
-                "all keys exhausted: badplugin: plugin badplugin: exited with status 1"
+                "all keys exhausted: badplugin: plugin badplugin: exited with status exit status: 1"
             ),
-            "badplugin exited with status 1"
+            "badplugin exited with status exit status: 1"
         );
     }
 }
