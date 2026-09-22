@@ -6,7 +6,7 @@
 
 use scraper::{ElementRef, Html, Selector};
 
-use crate::extract::{ContentKind, ExtractOptions, Extracted};
+use crate::extract::{ContentKind, ExtractOptions, Extracted, inline};
 
 const MAX_ENTRIES: usize = 40;
 
@@ -223,7 +223,9 @@ fn nav_from(doc: &Html, selectors: &str) -> Vec<(usize, String, String)> {
 }
 
 fn text_of(el: ElementRef) -> String {
-    el.text().collect::<String>().trim().to_string()
+    // Visible text only: a script/style subtree inside the element is
+    // source, not content (#288).
+    inline::visible_text_raw(el).trim().to_string()
 }
 
 #[cfg(test)]

@@ -394,7 +394,9 @@ fn render_md_at(el: ElementRef, url: &str, opts: &ExtractOptions, depth: usize) 
                         }
                     }
                     "pre" => {
-                        let code: String = c.text().collect::<Vec<_>>().join("");
+                        // Script/style subtrees are never source
+                        // content, even inside a pre (#288).
+                        let code = inline::visible_text_raw(c);
                         let code = code.trim_matches('\n');
                         if !code.is_empty() {
                             let fence = super::render::code_fence(code);

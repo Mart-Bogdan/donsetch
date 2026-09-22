@@ -665,6 +665,71 @@ pub(super) fn strip_part_frontmatter(md: &str) -> String {
     lines[start..].join("\n").trim().to_string()
 }
 
+/// Whether a tier-1 verdict means the ADAPTER rewrite bought
+/// nothing: every non-content verdict, a challenge included. The
+/// adapter is an optimization the caller never asked for, and
+/// adapter endpoints never route to the browser (a `.json` page in
+/// a browser is useless), so a refusal there must retry the page
+/// the caller asked for (#287: every reddit fetch died on a single
+/// `.json` 403 with no browser pass and a one-step trail).
+fn adapter_hop_failed(verdict: Verdict, adapter_host: bool, no_adapter: bool) -> bool {
+    adapter_host && !no_adapter && !matches!(verdict, Verdict::ContentOk)
+}
+
+/// Retry the caller's URL without the adapter rewrite, and fold the
+/// adapter hop's trail in front of the retry's so the escalation
+/// reads as ONE ladder rather than two unrelated hops. The retry
+/// runs the full generic pipeline, which escalates on its own
+/// rules (HTML fetch, ghost, cookie retry).
+async fn adapter_fallback(
+    daemon: &Arc<Daemon>,
+    args: &Value,
+    orig_url: &str,
+    trace: &mut Trace,
+    action: &str,
+    why: &str,
+) -> Value {
+    trace.step("adapter", action, why, 0);
+    let prior = match trace.value() {
+        Value::Array(a) => a,
+        _ => Vec::new(),
+    };
+    let mut args2 = args.clone();
+    args2["_no_adapter"] = json!(true);
+    let mut res = Box::pin(fetch_single_inner(daemon, &args2, orig_url)).await;
+    if let Some(sc) = res.pointer_mut("/structuredContent") {
+        sc["adapter_fallback"] = json!(true);
+    }
+    fold_trace_into_result(&mut res, prior);
+    res
+}
+
+/// Put the adapter hop's steps in front of the retry's own trail.
+/// Error envelopes carry the trail in `structuredContent`; success
+/// results carry it under `_meta.com.donsetch/fetch-debug`.
+fn fold_trace_into_result(res: &mut Value, prior: Vec<Value>) {
+    if prior.is_empty() {
+        return;
+    }
+    if let Some(esc) = res
+        .pointer_mut("/structuredContent/escalation")
+        .and_then(Value::as_array_mut)
+    {
+        let mut combined = prior;
+        combined.append(esc);
+        *esc = combined;
+        return;
+    }
+    if let Some(esc) = res
+        .pointer_mut("/_meta/com.donsetch~1fetch-debug/escalation")
+        .and_then(Value::as_array_mut)
+    {
+        let mut combined = prior;
+        combined.append(esc);
+        *esc = combined;
+    }
+}
+
 #[allow(clippy::field_reassign_with_default)]
 pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: &str) -> Value {
     let t0 = std::time::Instant::now();
@@ -955,10 +1020,16 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
             Err(e) => {
                 if adapter_host && !no_adapter {
                     // Transport failure on the adapter endpoint :
-                    // try the original URL before giving up.
-                    let mut args2 = args.clone();
-                    args2["_no_adapter"] = json!(true);
-                    return Box::pin(fetch_single_inner(daemon, &args2, &orig_url)).await;
+                    // retry the caller's URL before giving up.
+                    return adapter_fallback(
+                        daemon,
+                        args,
+                        &orig_url,
+                        &mut trace,
+                        "fallback",
+                        "transport error : retrying original URL",
+                    )
+                    .await;
                 }
                 let kind = fetch_error_kind(&e);
                 return tool_error_structured(
@@ -1050,25 +1121,19 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
                 // subresource burst for stealth-relevant hosts.
                 crate::fetch::shadow::maybe_shadow(&daemon.fetcher, &daemon.state, &o.url, o).await;
             }
+            // A refusal on an ADAPTER endpoint (a challenge
+            // included) is a failed adapter hop, never the end of
+            // the ladder: retry the caller's URL through the generic
+            // pipeline, which escalates to the browser on its own
+            // rules (#287: reddit's `.json` 403 used to end every
+            // fetch at exactly this point).
+            _ if adapter_hop_failed(o.verdict, adapter_host, no_adapter) => {
+                let why = format!("{:?} : retrying original URL", o.verdict);
+                return adapter_fallback(daemon, args, &orig_url, &mut trace, "fallback", &why)
+                    .await;
+            }
             Verdict::Challenge(_) if tier != "1" => {}
             v => {
-                if adapter_host && !no_adapter {
-                    let mut args2 = args.clone();
-                    args2["_no_adapter"] = json!(true);
-                    trace.step(
-                        "adapter",
-                        "fallback",
-                        &format!("{:?} : retrying original URL", v),
-                        0,
-                    );
-                    let mut res = Box::pin(fetch_single_inner(daemon, &args2, &orig_url)).await;
-                    // Fold the adapter attempt into the trace so
-                    // the agent sees why there are two hops.
-                    if let Some(sc) = res.pointer_mut("/structuredContent") {
-                        sc["adapter_fallback"] = json!(true);
-                    }
-                    return res;
-                }
                 let kind = verdict_kind(v, o.status);
                 // v3.4: bypass fetch for hard walls (Challenge/Blocked).
                 // Fires on tier != "1" (respect explicit no-escalation).
@@ -1108,19 +1173,15 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
             Some(b'{') | Some(b'[')
         )
     {
-        trace.step(
-            "adapter",
+        return adapter_fallback(
+            daemon,
+            args,
+            &orig_url,
+            &mut trace,
             "shape-mismatch",
             "200 but not JSON : retrying original URL",
-            0,
-        );
-        let mut args2 = args.clone();
-        args2["_no_adapter"] = json!(true);
-        let mut res = Box::pin(fetch_single_inner(daemon, &args2, &orig_url)).await;
-        if let Some(sc) = res.pointer_mut("/structuredContent") {
-            sc["adapter_fallback"] = json!(true);
-        }
-        return res;
+        )
+        .await;
     }
 
     // === Tier-1 extraction (when we have a body) ===
@@ -3332,15 +3393,22 @@ pub(super) fn apply_page_history(
             *cell = json!(body);
         }
     } else if changed != "new" {
-        // Note in the content on change (first contact with the
-        // delta is valuable; unchanged stays silent).
-        if let Some(d) = &delta
+        // A change note in the content: ONE line, never the delta
+        // body. The section-level diff belongs to `since_last` (and
+        // to structuredContent.changed_sections); the unasked prepend
+        // repeated every extracted fragment into the header and was
+        // 34% of a product-page answer (#289).
+        if delta.is_some()
             && let Some(cell) = res.pointer_mut("/content/0/text")
             && let Some(md) = cell.as_str().map(String::from)
         {
+            let ago_part = if ago > 0 {
+                format!(", {ago}s ago")
+            } else {
+                String::new()
+            };
             *cell = json!(format!(
-                "*[changed since last fetch ({}): {}]*\n\n{md}",
-                changed, d
+                "*[changed since last fetch ({changed}{ago_part}) : since_last=true returns just the delta]*\n\n{md}"
             ));
         }
     }
@@ -4048,5 +4116,64 @@ mod budget_tests {
     fn a_tiny_deadline_hits_the_floor_rather_than_zero() {
         let b = Budget::of(&args_with(Some(500)));
         assert_eq!(b.pass(20), std::time::Duration::from_secs(3));
+    }
+}
+
+#[cfg(test)]
+mod adapter_hop_tests {
+    use super::*;
+    use crate::detect::walls::Vendor;
+
+    // #287: a challenge (or any non-content verdict) on an adapter
+    // endpoint must retry the caller's URL. Before this, the
+    // `Challenge(_) if tier != "1"` arm swallowed it and the ladder
+    // ended after one HTTP request.
+    #[test]
+    fn a_refusal_on_an_adapter_endpoint_falls_back() {
+        assert!(adapter_hop_failed(
+            Verdict::Challenge(Vendor::Generic),
+            true,
+            false
+        ));
+        assert!(adapter_hop_failed(Verdict::Blocked, true, false));
+        assert!(adapter_hop_failed(Verdict::AuthWall, true, false));
+        // Served JSON is a good adapter hop: no fallback.
+        assert!(!adapter_hop_failed(Verdict::ContentOk, true, false));
+        // Non-adapter fetches keep their own escalation rules.
+        assert!(!adapter_hop_failed(
+            Verdict::Challenge(Vendor::Generic),
+            false,
+            false
+        ));
+        // The retry itself must not bounce (`_no_adapter`).
+        assert!(!adapter_hop_failed(Verdict::Blocked, true, true));
+    }
+
+    // The adapter hop's steps fold in FRONT of the retry's own trail
+    // so the escalation reads as one ladder.
+    #[test]
+    fn adapter_steps_are_folded_in_front_of_the_retry_trail() {
+        let mut res = serde_json::json!({
+            "structuredContent": {"escalation": [{"action": "route"}]}
+        });
+        fold_trace_into_result(&mut res, vec![serde_json::json!({"action": "http-fetch"})]);
+        let esc = res.pointer("/structuredContent/escalation").unwrap();
+        assert_eq!(esc[0]["action"], "http-fetch");
+        assert_eq!(esc[1]["action"], "route");
+    }
+
+    // Success results carry the trail under _meta; the fold reaches
+    // it there too.
+    #[test]
+    fn fold_reaches_the_success_meta_trail() {
+        let mut res = serde_json::json!({
+            "_meta": {"com.donsetch/fetch-debug": {"escalation": [{"action": "route"}]}}
+        });
+        fold_trace_into_result(&mut res, vec![serde_json::json!({"action": "adapter"})]);
+        let esc = res
+            .pointer("/_meta/com.donsetch~1fetch-debug/escalation")
+            .unwrap();
+        assert_eq!(esc[0]["action"], "adapter");
+        assert_eq!(esc[1]["action"], "route");
     }
 }

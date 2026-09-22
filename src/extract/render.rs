@@ -5,6 +5,9 @@ use super::blocks::Block;
 use super::metadata::Meta;
 
 pub fn render(meta: &Meta, url: &str, kept: &[&Block], opts: &super::ExtractOptions) -> String {
+    // Repeated boilerplate sections collapse before rendering
+    // (#288): see `collapse_repeats`.
+    let kept = collapse_repeats(kept);
     let mut out = String::new();
 
     // Frontmatter : compact, agent-first.
@@ -49,7 +52,7 @@ pub fn render(meta: &Meta, url: &str, kept: &[&Block], opts: &super::ExtractOpti
     // Cross-block exact-duplicate suppression: badge
     // dupes, repeated teasers. Keyed on normalized text.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for block in kept {
+    for block in &kept {
         match block {
             Block::Heading { level, text, .. } => {
                 // Skip the H1 that repeats the frontmatter title :
@@ -72,6 +75,11 @@ pub fn render(meta: &Meta, url: &str, kept: &[&Block], opts: &super::ExtractOpti
             } => {
                 // Bare-link / one-word lines: pure noise.
                 if md.len() < 25 && *link_density > 0.9 {
+                    continue;
+                }
+                // A widget's serialized data dumped into a text node
+                // is not prose (#288).
+                if looks_like_data_blob(md) {
                     continue;
                 }
                 if !seen.insert(normalize(md)) {
@@ -201,6 +209,115 @@ pub fn render(meta: &Meta, url: &str, kept: &[&Block], opts: &super::ExtractOpti
     out
 }
 
+/// #288: repeated boilerplate sections. Upsell blocks repeat per
+/// plan with the same heading and a near-identical body, and
+/// "Add to your order" headings stack. Two conservative collapses,
+/// applied before rendering:
+/// - an immediately repeated heading (same level, same normalized
+///   text) is kept once;
+/// - a section whose normalized body repeats its predecessor's is
+///   dropped whole: the first copy already showed it. Bodies under
+///   160 normalized chars never qualify, so short same-named
+///   sections on one page survive ("Overview" twice is structure).
+///
+/// Near-identical = equal after digits and punctuation are stripped,
+/// or a token-set Jaccard of 0.85 inside a 4k-char cap.
+fn collapse_repeats<'a>(kept: &[&'a Block]) -> Vec<&'a Block> {
+    const MIN_BODY: usize = 160;
+    const JACCARD_MIN: f64 = 0.85;
+    const JACCARD_CAP: usize = 4_000;
+
+    fn norm(s: &str) -> String {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    }
+    fn norm_body(s: &str) -> String {
+        let stripped: String = s
+            .chars()
+            .filter(|c| !c.is_ascii_digit() && !c.is_ascii_punctuation())
+            .collect();
+        norm(&stripped)
+    }
+    fn near_identical(a: &str, b: &str) -> bool {
+        if a == b {
+            return true;
+        }
+        if a.len() > JACCARD_CAP || b.len() > JACCARD_CAP {
+            return false;
+        }
+        let toks = |s: &str| -> std::collections::HashSet<String> {
+            s.split_whitespace().map(str::to_string).collect()
+        };
+        let (ta, tb) = (toks(a), toks(b));
+        if ta.is_empty() || tb.is_empty() {
+            return false;
+        }
+        let inter = ta.intersection(&tb).count() as f64;
+        let union = ta.union(&tb).count() as f64;
+        union > 0.0 && inter / union >= JACCARD_MIN
+    }
+
+    let mut out: Vec<&Block> = Vec::with_capacity(kept.len());
+    let mut last_section: Option<(String, String)> = None;
+    let mut prev_heading: Option<(u8, String)> = None;
+    let mut i = 0usize;
+    while i < kept.len() {
+        match kept[i] {
+            Block::Heading { level, text, .. } => {
+                let h = norm(text);
+                if prev_heading
+                    .as_ref()
+                    .is_some_and(|(l, t)| l == level && t == &h)
+                {
+                    i += 1;
+                    continue;
+                }
+                // The section: this heading through the block
+                // before the next heading of same-or-higher level.
+                let mut end = i + 1;
+                while end < kept.len() {
+                    if let Block::Heading { level: l2, .. } = kept[end]
+                        && l2 <= level
+                    {
+                        break;
+                    }
+                    end += 1;
+                }
+                let body = kept[i + 1..end]
+                    .iter()
+                    .map(|b| b.text())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let nb = norm_body(&body);
+                let repeated = nb.len() >= MIN_BODY
+                    && last_section
+                        .as_ref()
+                        .is_some_and(|(h2, b2)| h2 == &h && near_identical(b2, &nb));
+                if repeated {
+                    i = end;
+                    continue;
+                }
+                if nb.len() >= MIN_BODY {
+                    last_section = Some((h.clone(), nb));
+                } else {
+                    last_section = None;
+                }
+                prev_heading = Some((*level, h));
+                out.push(kept[i]);
+                i += 1;
+            }
+            _ => {
+                prev_heading = None;
+                out.push(kept[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Emit `list_items` output as markdown: "  " indentation per
 /// nesting level is already in each item; top-level items of an
 /// ordered list are numbered (nested ones get "-"), and the
@@ -220,6 +337,20 @@ pub(crate) fn push_list(out: &mut String, items: &[String], ordered: bool) {
         out.push_str(&format!("{indent}{bullet}{body}\n"));
     }
     out.push('\n');
+}
+
+/// A paragraph that is a serialized data blob rather than prose:
+/// JSON object/array syntax with real key density (#288: an
+/// injected buy-box widget's JSON landed in the output as a
+/// paragraph). The key-count and length floors keep prose ABOUT
+/// JSON, which practically never opens with a brace and carries
+/// `":` runs, out of the net.
+fn looks_like_data_blob(md: &str) -> bool {
+    let t = md.trim_start();
+    if t.len() < 80 || !(t.starts_with('{') || t.starts_with('[')) {
+        return false;
+    }
+    t.matches("\":").count() >= 4
 }
 
 fn normalize(s: &str) -> String {
@@ -285,5 +416,104 @@ mod tests {
         assert_eq!(code_fence("x\n````\ny"), "`````");
         assert_eq!(code_fence("`````\n"), "``````");
         assert_eq!(code_fence(""), "```");
+    }
+}
+
+#[cfg(test)]
+mod repeat_collapse_tests {
+    use super::*;
+
+    fn heading(level: u8, text: &str) -> Block {
+        Block::Heading {
+            level,
+            text: text.to_string(),
+            path: vec![text.to_string()],
+        }
+    }
+    fn para(md: &str) -> Block {
+        Block::Para {
+            md: md.to_string(),
+            link_density: 0.0,
+            path: Vec::new(),
+        }
+    }
+
+    const TERMS_A: &str = "Protect your purchase with an Asurion plan covering accidental damage, drops, spills, and mechanical failure for $24.99, with 24/7 support, no deductibles on approved claims, and cancellation any time.";
+    const TERMS_B: &str = "Protect your purchase with an Asurion plan covering accidental damage, drops, spills, and mechanical failure for $31.99, with 24/7 support, no deductibles on approved claims, and cancellation any time.";
+
+    // #288: the repeated upsell sections collapse to one; the digits
+    // differ, everything else repeats.
+    #[test]
+    fn a_repeated_upsell_section_collapses_to_one() {
+        let blocks = [
+            heading(3, "Product Protection by Asurion, LLC"),
+            para(TERMS_A),
+            heading(3, "Product Protection by Asurion, LLC"),
+            para(TERMS_B),
+            heading(3, "Product Protection by Asurion, LLC"),
+            para(TERMS_B),
+        ];
+        let refs: Vec<&Block> = blocks.iter().collect();
+        let kept = collapse_repeats(&refs);
+        assert_eq!(kept.len(), 2, "one heading + one body survive");
+        assert!(kept[1].text().contains("24.99"), "first copy kept");
+    }
+
+    // Adjacent identical headings stack on real pages; keep one.
+    #[test]
+    fn adjacent_duplicate_headings_keep_one() {
+        let blocks = [
+            heading(3, "Add to your order"),
+            heading(3, "Add to your order"),
+            para(TERMS_A),
+        ];
+        let refs: Vec<&Block> = blocks.iter().collect();
+        assert_eq!(collapse_repeats(&refs).len(), 2);
+    }
+
+    // Short same-named sections are structure, not boilerplate.
+    #[test]
+    fn short_same_named_sections_survive() {
+        let blocks = [
+            heading(2, "Overview"),
+            para("First part."),
+            heading(2, "Overview"),
+            para("Second part."),
+        ];
+        let refs: Vec<&Block> = blocks.iter().collect();
+        assert_eq!(collapse_repeats(&refs).len(), 4);
+    }
+
+    // Long sections with genuinely different bodies are content.
+    #[test]
+    fn different_bodies_below_the_same_heading_survive() {
+        let a = "Alpha ".repeat(40);
+        let b = "Beta ".repeat(40);
+        let blocks = [
+            heading(2, "Example"),
+            para(&a),
+            heading(2, "Example"),
+            para(&b),
+        ];
+        let refs: Vec<&Block> = blocks.iter().collect();
+        assert_eq!(collapse_repeats(&refs).len(), 4);
+    }
+
+    // #288 item 3: an injected widget's JSON is dropped, and prose
+    // that merely talks about JSON survives.
+    #[test]
+    fn a_json_data_blob_is_dropped_but_prose_about_json_survives() {
+        let blob = r#"{"desktop_buybox_group_1":[{"displayPrice":"$31.99","priceAmount":31.99,"currencySymbol":"$","integerValue":"31","decimalSeparator":".","fractionalValue":"99","symbolPosition":"left"}]}"#;
+        assert!(looks_like_data_blob(blob));
+        assert!(looks_like_data_blob(&format!("[{blob}]")));
+        assert!(!looks_like_data_blob(
+            "The API answers with {\"ok\": true} and that is all it says."
+        ));
+        assert!(!looks_like_data_blob(
+            "{\"a\":1} is a valid JSON document that you can parse."
+        ));
+        assert!(!looks_like_data_blob(
+            "A normal paragraph of prose with no braces at all, long enough to pass any length gate."
+        ));
     }
 }

@@ -6,7 +6,7 @@
 
 use scraper::{ElementRef, Html, Selector};
 
-use crate::extract::{ContentKind, ExtractOptions, Extracted};
+use crate::extract::{ContentKind, ExtractOptions, Extracted, inline};
 
 pub fn extract(html: &str, url: &str, opts: &ExtractOptions) -> Option<Extracted> {
     if opts.selector.is_some() {
@@ -154,7 +154,9 @@ fn field_value(td: ElementRef) -> String {
 }
 
 fn plain_text(el: ElementRef) -> String {
-    el.text().collect::<String>().trim().to_string()
+    // Visible text only: a script/style subtree inside the element is
+    // source, not content (#288).
+    inline::visible_text_raw(el).trim().to_string()
 }
 
 /// Page furniture, checked on the element itself (selecting

@@ -228,8 +228,10 @@ fn walk<'a>(
             }
         }
         "pre" => {
-            // Raw text, whitespace PRESERVED (code must keep newlines).
-            let code: String = el.text().collect::<Vec<_>>().join("");
+            // Raw text, whitespace PRESERVED (code must keep newlines);
+            // script/style subtrees are never source content, even
+            // inside a pre (#288).
+            let code = inline::visible_text_raw(el);
             let code = code.trim_matches('\n').to_string();
             // Collapse 3+ consecutive newlines to 2: common in
             // source code, each blank line pair wastes tokens.

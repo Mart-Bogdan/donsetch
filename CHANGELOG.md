@@ -23,6 +23,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `parse_provider_json` now keeps the transport error, names an
   empty body, and reports a parse failure with its status and byte
   count, across all nine clients (#286).
+- A refused reddit `.json` rewrite no longer ends the fetch. Every
+  `www.reddit.com` thread died on a single 403 with a two-step trail,
+  because a challenge on an adapter endpoint matched an arm that does
+  nothing, and adapter endpoints never route to the browser. Any
+  refusal on an adapter rewrite (a challenge included) now retries
+  the page the caller asked for through the generic ladder, and the
+  adapter hop's trail is folded in front of the retry's so the
+  escalation reads as one ladder (`domain-profile` → `http-fetch`
+  403 → `adapter fallback` → `browser-launch` → solve pass →
+  `http-retry-with-ghost-cookies`). (#287)
+- Extraction no longer ships invisible nodes as content: an inline
+  `<style>` inside a price heading, a `<script>` inside a spec-table
+  cell and a comment header's `SML.load(...)` call all reached the
+  output through the raw text iterator behind headings, table cells,
+  list terms and the adapters. Invisible tags (script, style,
+  noscript, template, svg, canvas, iframe, object, embed) contribute
+  no text anywhere now, ad slots (reddit's `shreddit-ad-post`, the
+  common ad-wrapper classes) are skipped before extraction, a
+  serialized JSON blob sitting in a text node is dropped instead of
+  rendered as a paragraph, and a section that repeats its
+  predecessor (same heading, same body modulo numbers, like a
+  protection plan repeated per variant) renders once. On the issue's
+  own page shape the leaked output drops from 1543 to 715 bytes with
+  every real block kept. (#288)
+- A re-fetch of a changed page no longer prepends the full section
+  delta unless `since_last` asked for it. The unasked note is one
+  line now (`*[changed since last fetch (rewritten) :
+  since_last=true returns just the delta]*`) and the delta stays in
+  `structuredContent.changed_sections`, where it already lived. On a
+  product page the old header was 1955 characters, 34% of the
+  answer, repeating every extracted fragment. `since_last` behavior
+  is unchanged, the collapse-to-delta included. (#289)
+- A response carrying an unrecognised `Content-Encoding` token (S3's
+  classic `Content-Encoding: UTF-8` on a plain body) is passed
+  through as identity instead of failing the fetch permanently, and
+  the escalation ladder stays alive behind it. `x-gzip` and
+  `x-deflate` decode as their canonical names, a recognised codec
+  that genuinely fails to decode still errors loudly, and the size
+  cap applies to the pass-through exactly as to identity. The
+  284-page guideline PDF from the report now fetches at tier 1.
+  (#290)
 
 ## [4.3.0] - 2026-09-22
 
