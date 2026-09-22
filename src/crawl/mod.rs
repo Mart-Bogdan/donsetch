@@ -1927,7 +1927,11 @@ fn self_harvest_static(html: &str, _base: &Url) -> Vec<(String, String)> {
         let Some(href) = a.value().attr("href") else {
             continue;
         };
-        let anchor: String = a.text().collect::<String>().trim().to_string();
+        // Visible text only: a script inside an anchor is tracking
+        // code, never a link label (#288's class).
+        let anchor: String = crate::extract::inline::visible_text_raw(a)
+            .trim()
+            .to_string();
         out.push((href.to_string(), anchor));
     }
     out
@@ -1939,4 +1943,20 @@ fn host_matches(a: &str, b: &str) -> bool {
     let a = a.strip_prefix("www.").unwrap_or(a);
     let b = b.strip_prefix("www.").unwrap_or(b);
     a.eq_ignore_ascii_case(b)
+}
+
+#[cfg(test)]
+mod anchor_text_guard_tests {
+    use super::self_harvest_static;
+
+    // A script inside an <a> is tracking code, never a link label
+    // (#288's class, crawl side).
+    #[test]
+    fn anchor_labels_never_carry_script_text() {
+        let html = "<a href=\"/docs\">Docs<script>void 0;</script></a>";
+        let found = self_harvest_static(html, &url::Url::parse("https://example.com/").unwrap());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "/docs");
+        assert_eq!(found[0].1, "Docs");
+    }
 }

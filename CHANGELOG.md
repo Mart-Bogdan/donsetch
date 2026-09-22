@@ -64,6 +64,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cap applies to the pass-through exactly as to identity. The
   284-page guideline PDF from the report now fetches at tier 1.
   (#290)
+- The invisible-text rule now covers every remaining DOM collector:
+  search result titles and snippets, crawl link labels, feed
+  summaries, `jsdata`'s mined strings, the dedicated extractors and
+  the adapters all skip script and style subtrees now (the same
+  raw-text leak class as #288, found while hardening it).
+- `jsdata`'s embedded-HTML stripper never worked: it selected `body`
+  on a FRAGMENT tree, and a fragment has none, so every mined string
+  carrying markup was silently emptied instead of stripped and the
+  item vanished from SPA renders. It walks the fragment root now, so
+  `<b>Title</b>` yields `Title` instead of nothing.
 
 ## [4.3.0] - 2026-09-22
 

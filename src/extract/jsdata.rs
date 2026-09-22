@@ -897,14 +897,14 @@ fn strip_html(s: &str) -> String {
     if !s.contains('<') || !s.contains('>') {
         return s.to_string();
     }
+    // A FRAGMENT has no <body>: the old `select("body")` matched
+    // nothing and `unwrap_or_default()` emptied every string that
+    // carried markup, so mined items vanished instead of rendering.
+    // Walk the fragment root instead; script/style subtrees never
+    // contribute (#288).
     let doc = Html::parse_fragment(s);
-    let text: String = doc
-        .select(&scraper::Selector::parse("body").unwrap())
-        .next()
-        .map(|b| b.text().collect())
-        .unwrap_or_default();
-    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed
+    let text = super::inline::visible_text_raw(doc.root_element());
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// HTML-entity-unescape the raw JSON (DOM encodes it).
@@ -1195,5 +1195,20 @@ mod tests {
     fn strip_frame_key_passes_through_plain_json() {
         assert_eq!(strip_frame_key("[\"$\",\"p\"]"), "[\"$\",\"p\"]");
         assert_eq!(strip_frame_key("12:{\"a\":1}"), "{\"a\":1}");
+    }
+}
+
+#[cfg(test)]
+mod strip_html_guard_tests {
+    use super::strip_html;
+
+    // A mined string carrying a script element must not leak its
+    // source into the rendered item (#288's class).
+    #[test]
+    fn strip_html_never_leaks_script_text() {
+        let out = strip_html("Hello <script>var leak = 1;</script>world");
+        assert!(!out.contains("leak"), "{out}");
+        assert!(out.contains("Hello"), "{out}");
+        assert!(out.contains("world"), "{out}");
     }
 }
