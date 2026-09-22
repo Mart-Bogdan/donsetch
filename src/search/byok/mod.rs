@@ -221,7 +221,9 @@ impl ByokSearcher {
 
     /// True if at least one keyed provider or plugin exists.
     pub fn is_configured(&self) -> bool {
-        self.store.is_configured() || self.plugins.is_configured()
+        // Search-scoped: a store holding only fetch-side keys
+        // (unlocker) is not a configured search (#284).
+        self.store.has_search_providers() || self.plugins.is_configured()
     }
 
     /// True if "local" is the default search method.

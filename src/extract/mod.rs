@@ -21,6 +21,7 @@ pub mod language;
 pub mod math;
 pub mod metadata;
 pub mod nesting;
+pub mod quality;
 pub mod reddit;
 pub mod render;
 pub mod score;

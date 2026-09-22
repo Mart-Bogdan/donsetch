@@ -5,7 +5,7 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.3.0] - 2026-09-22
 
 ### Changed
 - A tier-2 render no longer waits a fixed four seconds on pages that
@@ -41,9 +41,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - A small page with no `<script>` but an inline load-time handler
   (`<body onload="…">`, `<img onerror="…">`) can still build itself
-  after load; the scriptless fast path from 4.2.10 skipped the tier-2
-  settle floor for it. Load-time handlers count as script again;
-  click handlers, which need a user, do not.
+  after load; the scriptless fast path skipped the tier-2 settle
+  floor for it. Load-time handlers count as script again; click
+  handlers, which need a user, do not.
+- The ghost lane's `Xvfb` child was never waited on. An Xvfb that
+  died while donsetch lived sat as a `<defunct>` zombie for the rest
+  of the process's life, and a hard parent death (SIGKILL from the
+  OOM killer, a Ctrl-C'd CLI) left the display detached at PPID 1
+  forever; a three-day-old orphan showed on a reporter's box. One
+  reaper task owns the child now (it reaps within a tick and is the
+  only thing that kills it), `PR_SET_PDEATHSIG` makes the kernel
+  kill the display with its parent for any death, and a display
+  that never came up is killed on the failure path instead of
+  leaked (#280).
+- `donsetch mcp --supervised` replayed raw byte history after a
+  child died, so the replacement re-ran every request the dead
+  child had already answered: a long session replayed ~50 finished
+  fetch batches (minutes of CPU, gigabytes of RSS) and the client
+  logged one "unknown message ID" per duplicate response. The
+  replay window is request-level now: every line the client sends
+  with an id is held until its response passes through the stdout
+  forwarder (or the client cancels it), and only unanswered
+  requests replay (#281).
+- "The extraction produced text" was the whole success test, so a
+  client-rendered shell's navigation and login chrome (240 chars of
+  nav, title, footer and "Continue with Email") and an unsolved
+  challenge interstitial (323 chars of vendor prose) shipped as
+  `content_ok`. Two positive tests gate the success path now:
+  chrome-only extraction (small, prompt-laden, prose-poor) fails as
+  `wall.empty_shell`, and an interstitial's own words fail as
+  `wall.challenge_unsolved`. Both are `walled`, so the escalation
+  ladder (ghost render, a configured unlocker) engages instead of
+  the agent trusting boilerplate; the ghost settle oracle also
+  refuses to settle on an interstitial any more, so a challenge
+  that clears seconds later is waited out rather than shipped
+  (#282).
+- Both reddit adapters retargeted fetches to `old.reddit.com`,
+  which serves a login wall to anonymous clients on HTML and
+  `.json` alike: every reddit fetch paid a dead hop (and on a
+  walled host already recorded by the detector, the wasted hop
+  escalated to a billed unlocker call), while a caller who
+  supplied the working `www.reddit.com/....json` URL was detoured
+  through the wall first. The `.json` path rewrite stays and keeps
+  the caller's host; the old.reddit retarget is gone (#283).
+- `donsetch keys add unlocker` put the Web Unlocker in the search
+  provider list: every search burned one guaranteed-failing
+  dispatch (`unknown provider: unlocker`), the add claimed "BYOK
+  search is now active : local search is bypassed" for a key that
+  cannot serve a search, and the unlocker held the search-default
+  slot. Fetch-side providers are tagged now: the unlocker stays out
+  of the search chain, out of default selection and out of the
+  search notes, while `keys list` still shows the key with its
+  fetch-side role; a store already carrying `default=unlocker`
+  heals on the next key add (#284).
 - `robots.txt` rules with `*` or a trailing `$` (`Disallow: /*.pdf$`,
   `Disallow: /*?`, `Disallow: /private*/`) were matched as literal
   prefixes, so they matched nothing and a crawl with `respect_robots`

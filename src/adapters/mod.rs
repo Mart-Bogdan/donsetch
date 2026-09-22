@@ -57,16 +57,21 @@ pub struct BuiltinRewrite {
 }
 
 /// The bundled rewrite set, in dispatch order.
-const BUILTIN_REWRITES: [BuiltinRewrite; 7] = [
+///
+/// There is deliberately no old.reddit.com retarget (issue #283):
+/// both reddit rewrites used to point there, the host serves a
+/// login wall to anonymous clients on HTML and `.json` alike, and
+/// the shape-mismatch guard silently repaired the result afterwards
+/// : every reddit fetch paid a dead hop (and, on a host already
+/// recorded as walled, an unlocker escalation) while a caller who
+/// supplied the working `www.reddit.com/....json` URL was detoured
+/// through the wall first. `www.reddit.com` serves the same JSON
+/// the adapter parses, so the host stays the caller's.
+const BUILTIN_REWRITES: [BuiltinRewrite; 6] = [
     BuiltinRewrite {
         via: "adapter:reddit-json",
-        description: "reddit thread and listing pages -> old.reddit .json endpoints",
+        description: "reddit thread and listing pages -> .json endpoints on the same host",
         apply: reddit_json_rw,
-    },
-    BuiltinRewrite {
-        via: "adapter:reddit-old",
-        description: "other reddit pages -> the legacy SSR host old.reddit.com",
-        apply: reddit_old_rw,
     },
     BuiltinRewrite {
         via: "adapter:npm-registry",
@@ -150,21 +155,13 @@ fn reddit_json_rw(u: &url::Url) -> Option<String> {
     if !(is_thread || is_listing) || path_part.ends_with(".json") {
         return None;
     }
-    // Keep query (?t=top sorts) : drop fragments only.
+    // Keep query (?t=top sorts) : drop fragments only. The host
+    // stays the caller's (issue #283): www.reddit.com serves this
+    // same JSON, and the old.reddit.com retarget that used to be
+    // here landed on a login wall and detoured working URLs.
     let mut u2 = u.clone();
-    let _ = u2.set_host(Some("old.reddit.com"));
     u2.set_path(&format!("{path_part}.json"));
     u2.set_fragment(None);
-    Some(u2.to_string())
-}
-
-fn reddit_old_rw(u: &url::Url) -> Option<String> {
-    let host = u.host_str()?;
-    if !matches!(host, "www.reddit.com" | "reddit.com") {
-        return None;
-    }
-    let mut u2 = u.clone();
-    let _ = u2.set_host(Some("old.reddit.com"));
     Some(u2.to_string())
 }
 
@@ -345,7 +342,7 @@ mod tests {
         let (u, via) = rw("https://www.reddit.com/r/rust/comments/abc123/title_here/").unwrap();
         assert_eq!(
             u,
-            "https://old.reddit.com/r/rust/comments/abc123/title_here.json"
+            "https://www.reddit.com/r/rust/comments/abc123/title_here.json"
         );
         assert_eq!(via, "adapter:reddit-json");
     }
@@ -353,22 +350,27 @@ mod tests {
     #[test]
     fn reddit_listing_gets_json() {
         let (u, via) = rw("https://reddit.com/r/programming/?t=top").unwrap();
-        assert_eq!(u, "https://old.reddit.com/r/programming.json?t=top");
+        assert_eq!(u, "https://reddit.com/r/programming.json?t=top");
         assert_eq!(via, "adapter:reddit-json");
         let (u, _) = rw("https://www.reddit.com/").unwrap();
-        assert_eq!(u, "https://old.reddit.com/.json");
+        assert_eq!(u, "https://www.reddit.com/.json");
     }
 
+    // #283: no reddit URL shape is detoured through the walled
+    // old.reddit.com host any more (the retarget is gone).
     #[test]
-    fn reddit_user_page_gets_old_domain_only() {
-        let (u, via) = rw("https://www.reddit.com/user/spez/").unwrap();
-        assert_eq!(u, "https://old.reddit.com/user/spez/");
-        assert_eq!(via, "adapter:reddit-old");
+    fn reddit_user_page_is_not_detoured() {
+        assert!(rw("https://www.reddit.com/user/spez/").is_none());
     }
 
     #[test]
     fn already_json_not_double_appended() {
         assert!(rw("https://old.reddit.com/r/rust.json").is_none());
+        // A caller who supplies the URL that actually works is not
+        // detoured: no second hop, no unlocker credit spent on the
+        // wall (issue #283).
+        assert!(rw("https://www.reddit.com/r/rust/comments/abc/x.json").is_none());
+        assert!(rw("https://www.reddit.com/r/rust.json?limit=50").is_none());
     }
 
     #[test]

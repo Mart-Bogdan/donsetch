@@ -551,7 +551,13 @@ pub async fn ghost_fetch(
         // hydration (infinite scroll + viewport-gated render).
         let big_dom = cur_len >= 50_000;
         let visible = visible_text_len(&html);
-        let substantive = visible >= if big_dom { 800 } else { 80 };
+        // An interstitial is never substantive, however much vendor
+        // boilerplate it renders: settling on "Verifying your
+        // browser…" shipped the challenge page as content (issue
+        // #282 case B). Wait for the challenge to clear; a wall
+        // that never clears stays a failure on the timeout path.
+        let interstitial = crate::detect::walls::detect_interstitial(html.as_bytes()).is_some();
+        let substantive = !interstitial && visible >= (if big_dom { 800 } else { 80 });
         if big_dom && visible < 800 && !scrolled && start.elapsed() > Duration::from_secs(8) {
             scrolled = true;
             let _ = ghost.scroll("down", 2400).await;

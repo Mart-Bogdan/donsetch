@@ -4,8 +4,8 @@
 //! One plain-HTTP GET replaces the ghost-prone HTML scrape:
 //! comment trees with scores/ages, listings with vote counts :
 //! no JS shell, no login overlay. Anything unexpected returns
-//! `None` → the caller falls back to the old.reddit HTML
-//! extractor or generic DonSift.
+//! `None` → the caller falls back to the generic HTML path or
+//! DonSift.
 
 use serde_json::Value;
 
@@ -14,8 +14,9 @@ use crate::extract::{ContentKind, ExtractOptions, Extracted};
 const MAX_COMMENTS: usize = 150;
 const MAX_DEPTH: usize = 8;
 
-/// Entry point. `url` is the final fetched URL (old.reddit.com/
-/// ...json after the fetch-level rewrite).
+/// Entry point. `url` is the final fetched URL (a `...json`
+/// endpoint on any reddit host: the fetch-level rewrite keeps the
+/// caller's host, issue #283).
 pub fn extract(body: &[u8], url: &str, opts: &ExtractOptions) -> Option<Extracted> {
     let host = url::Url::parse(url).ok()?.host_str()?.to_string();
     if !host.ends_with("reddit.com") {

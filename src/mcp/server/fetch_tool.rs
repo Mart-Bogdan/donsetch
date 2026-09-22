@@ -798,8 +798,8 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
     // === Decision: how to route this fetch? ===
     // The self-improving loop: the domain profile decides
     // cold / warm / skip-to-solve / recheck-cold.
-    // Adapter endpoints (reddit .json / old.reddit SSR, package
-    // registry APIs) are plain-GET structured targets : never
+    // Adapter endpoints (reddit .json, package registry APIs) are
+    // plain-GET structured targets : never
     // need a browser. Force Cold even if a stale profile says
     // SkipToSolve (from a previous Xvfb failure that poisoned
     // the domain).
@@ -1279,12 +1279,28 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
             .as_ref()
             .map(|e| looks_like_shell_text(&e.markdown))
             .unwrap_or(false);
+    // #282: "the extraction is non-empty" is not a success test. A
+    // challenge interstitial or a chrome-only shell extracted at
+    // tier 1 must escalate (auto) or fail honestly, not serve.
+    let challenge_text = status_2xx
+        && final_ex
+            .as_ref()
+            .map(|e| crate::detect::walls::challenge_text(&e.markdown))
+            .unwrap_or(false);
+    let chrome_text = status_2xx
+        && !is_pdf_content
+        && final_ex
+            .as_ref()
+            .map(|e| crate::extract::quality::chrome_only(&e.markdown))
+            .unwrap_or(false);
     let need_ghost = !is_pdf_content
         && !adapter_host // adapter endpoints (reddit .json, registry APIs) are plain GETs
         && ((challenge && tier != "1" && !is_small_404)
             || skip_tier1
             || (still_thin && tier == "auto" && !is_small_404)
-            || (shell_text && tier == "auto"));
+            || (shell_text && tier == "auto")
+            || (challenge_text && tier == "auto")
+            || (chrome_text && tier == "auto" && !is_small_404));
 
     if need_ghost {
         // Render-cache shortcut: a previously recovered DOM.
@@ -1500,6 +1516,24 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
             })),
         );
     };
+
+    // #282: a challenge interstitial or a chrome-only shell is not
+    // content, whatever tier produced it. The failure is "walled"
+    // so the escalation ladder (ghost, a configured unlocker) can
+    // engage instead of the agent trusting navigation boilerplate.
+    if let Some((msg, kind, action)) = content_fail(&ex.markdown, &url, final_status) {
+        return tool_error_structured(
+            msg,
+            kind,
+            Some(json!({
+                "url": url,
+                "status": final_status,
+                "verdict": "Challenge(Generic)",
+                "next_action": action,
+                "escalation": trace.value(),
+            })),
+        );
+    }
 
     // Final shell gate: a framework dump (React server renders)
     // must never ship as successful content regardless of the tier
@@ -1830,12 +1864,16 @@ pub(super) async fn ghost_escalate(
                 // The wall survived BOTH passes in a real browser:
                 // this is wall-persisting evidence, recorded.
                 daemon.state.lock().await.record_wall_failed(host);
-                return Err((
-                    format!(
-                        "blocked at {url} : interactive captcha or challenge could not be solved automatically. Use an Agent browser to browse sites like these"
-                    ),
-                    "walled",
-                ));
+                // #282: different recoveries get different codes. A
+                // page holding an interactive captcha widget needs a
+                // human or a vendor solver; a vendor-less challenge
+                // that never finished is the retry-or-unlocker class.
+                let msg = if crate::detect::walls::interactive_captcha(p2.html.as_bytes()) {
+                    "interactive captcha or challenge could not be solved automatically. Use an Agent browser to browse sites like these".to_string()
+                } else {
+                    "the page is an anti-bot challenge that did not clear (the challenge never finished on its own; retry later or let a configured unlocker solve this class)".to_string()
+                };
+                return Err((format!("blocked at {url} : {msg}"), "walled"));
             }
             // ghost_fetch errored on the retry (automation failure,
             // not a wall): no wall memory recorded.
@@ -2030,6 +2068,12 @@ pub(super) async fn ghost_escalate(
     if let Some((thin, e, t, s, u)) = best
         && !thin
     {
+        // #282: a challenge interstitial or chrome-only shell that
+        // passed the thin gate must not be served (or learned from)
+        // as content.
+        if let Some((msg, kind, _)) = content_fail(&e.markdown, url, s) {
+            return Err((msg, kind));
+        }
         // Learning is gated on WALL-DRIVEN escalation AND gated on
         // CONTENT : success is "we got content", not "we got HTTP
         // 200". The replay probe (or its absence) sets replay_ok.
@@ -2114,7 +2158,13 @@ pub(super) async fn ghost_escalate(
             let login_only = fb.markdown.len() < 60
                 && (fb.markdown.to_ascii_lowercase().contains("log in")
                     || fb.markdown.to_ascii_lowercase().contains("sign up"));
-            if !fb.thin || (fb.markdown.len() >= 40 && !login_only) {
+            // The last resort must not resurrect junk (#282): a
+            // challenge interstitial or chrome-only shell stays a
+            // failure even though its text is technically non-empty.
+            let status = retry.as_ref().map(|r| r.status).unwrap_or(200);
+            if content_fail(&fb.markdown, url, status).is_none()
+                && (!fb.thin || (fb.markdown.len() >= 40 && !login_only))
+            {
                 return Ok((fb, "ghost-text", 200, url.to_string()));
             }
         }
@@ -2130,12 +2180,15 @@ pub(super) async fn ghost_escalate(
     let dom_verdict = crate::detect::walls::detect_dom_smart(page.html.as_bytes());
     if matches!(dom_verdict, Verdict::Challenge(_)) {
         daemon.state.lock().await.record_wall_failed(host);
-        return Err((
-            format!(
-                "blocked at {url} : interactive captcha or challenge could not be solved automatically. Use an Agent browser to browse sites like these"
-            ),
-            "walled",
-        ));
+        // #282: the code must say which recovery applies. An
+        // interactive widget needs a human or a vendor solver; a
+        // bare challenge that never finished is retry-or-unlocker.
+        let msg = if crate::detect::walls::interactive_captcha(page.html.as_bytes()) {
+            "interactive captcha or challenge could not be solved automatically. Use an Agent browser to browse sites like these".to_string()
+        } else {
+            "the page is an anti-bot challenge that did not clear (the challenge never finished on its own; retry later or let a configured unlocker solve this class)".to_string()
+        };
+        return Err((format!("blocked at {url} : {msg}"), "walled"));
     }
     if page.html.len() < 5_000 {
         return Err((
@@ -2208,6 +2261,36 @@ fn looks_like_shell_text(markdown: &str) -> bool {
         })
         .count();
     ident * 100 / tokens.len() >= 40
+}
+
+/// Positive content tests (#282): a challenge interstitial or a
+/// chrome-only shell that made it through as "some text" is not
+/// content. Returns the honest failure for the extracted shape, or
+/// None when the text is real content.
+fn content_fail(
+    markdown: &str,
+    url: &str,
+    status: u16,
+) -> Option<(String, &'static str, &'static str)> {
+    if crate::detect::walls::challenge_text(markdown) {
+        return Some((
+            format!(
+                "blocked at {url} : the page is an anti-bot challenge that did not clear (the extracted text is the interstitial, not content)"
+            ),
+            "walled",
+            "retry later : the challenge may clear; tier=auto renders with a browser, and a configured unlocker solves this class",
+        ));
+    }
+    if (200..300).contains(&status) && crate::extract::quality::chrome_only(markdown) {
+        return Some((
+            format!(
+                "blocked at {url} : the page rendered only navigation and login chrome (an empty shell or a login wall), no content"
+            ),
+            "walled",
+            "use an agent browser to browse sites like these : the page may be a client-rendered shell or a login wall",
+        ));
+    }
+    None
 }
 
 pub(super) fn is_pdf_url_like(url: &str) -> bool {
