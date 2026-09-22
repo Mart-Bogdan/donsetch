@@ -5,6 +5,25 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- A BYOK provider failure fell back to local search with no visible
+  signal: the result line read `provider local`, indistinguishable
+  from a run with no provider configured, and the only record of
+  the failure was behind `DONSEEK_DEBUG`. The failure now rides the
+  `degraded:` field the local engine failures already use
+  (`degraded: byok brightdata parse error at HTTP 200, ...`), and
+  the same entry appears in `_meta.engines` (#285).
+- Every HTTP provider client read its response body with
+  `unwrap_or_default()`, so a body-read failure arrived as an empty
+  string, and its parse error dropped the HTTP status it already
+  held: an empty 200, a redirect and a malformed payload all read
+  "parse error: EOF while parsing a value". One shared
+  `parse_provider_json` now keeps the transport error, names an
+  empty body, and reports a parse failure with its status and byte
+  count, across all nine clients (#286).
+
 ## [4.3.0] - 2026-09-22
 
 ### Changed
