@@ -19,7 +19,7 @@ Each lane keeps two independent entries.
 
 **`target/`** holds every compiled artifact. It is handled by `actions/cache/restore` and `actions/cache/save` directly, as separate steps, so the workflow controls exactly when and under which key it is saved.
 
-rust-cache does not manage `target/` because of how it cleans up after a fallback restore: it deletes every artifact that was *compiled* more than seven days ago, before the build runs. Cargo never rewrites an artifact that is still fresh, and an exact cache hit is never saved again, so after a dependency bump that deletes most of a tree that is still in use. The rust-cache step must also run *before* the `target/` restore, because that cleanup walks `target/` even when told not to cache it.
+rust-cache does not manage `target/` because of how it cleans up after a fallback restore: it deletes every artifact that was *compiled* more than seven days ago, before the build runs. Cargo never rewrites an artifact that is still fresh, and an exact cache hit is never saved again, so after a dependency bump that deletes most of a tree that is still in use. The rust-cache step must also run *before* the `target/` restore, because that cleanup walks `target/` even when told not to cache it. The action is pinned to a commit rather than the moving `v2` tag, because a re-tag has changed that cleanup's behavior before (rust-cache issue #375 and PR #377).
 
 ## The `target/` key
 
@@ -64,9 +64,9 @@ A failed run, including one that hit a step's timeout, still saves its `target/`
 - **No sweep.** The steps after the failure never ran, so their artifacts were never read, and a sweep would delete exactly what the next run needs.
 - **A separate key**, `<exact key>-partial-<run id>-<attempt>`. Saving under the exact key would be a trap: an exact hit is never saved again, so an incomplete tree there would stay until the dependencies change.
 
-Before that save, a step stops any build processes still running. When a step hits its timeout, GitHub stops the step itself, but the compilers cargo started keep writing into `target/`, and `tar` then refuses to archive a tree that changes while it reads it. The save only logs a warning in that case, so without this step a timed-out run would silently save nothing.
+Before that save, a step stops any build processes still running. When a step hits its timeout, GitHub stops the step itself, but the compilers cargo started keep writing into `target/`, and `tar` then refuses to archive a tree that changes while it reads it. The save only logs a warning in that case, so without this step a timed-out run would silently save nothing. The step sends SIGTERM first and SIGKILL only to what is still running ten seconds later: `make` and the C compilers in build scripts (BoringSSL's CMake build, for one) delete their half-written output file on SIGTERM but not on SIGKILL, and a truncated object file with a fresh timestamp would look up to date to the next `make`. Cargo's own units are safe either way, since Cargo drops a unit's fingerprint before rebuilding it and writes a new one only after a successful compile.
 
-The next run finds the partial entry through the second restore key and continues from it instead of starting from nothing, and the first green run saves the complete, swept entry under the exact key. This breaks the pattern where a slow cold build times out, saves nothing, and the next run times out the same way. Cargo records a unit only after it compiles, so a partial tree is incomplete but never wrong. Cancelled runs save nothing.
+The next run finds the partial entry through the first restore key, which matches the exact key as a prefix, and continues from it instead of starting from nothing, and the first green run saves the complete, swept entry under the exact key. This breaks the pattern where a slow cold build times out, saves nothing, and the next run times out the same way. Cargo records a unit only after it compiles, so a partial tree is incomplete but never wrong. Cancelled runs save nothing.
 
 ## Pull requests never save
 

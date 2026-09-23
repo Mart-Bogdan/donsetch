@@ -2,9 +2,8 @@
 #
 # Test runs use cargo-nextest with the `ci` cargo profile (release
 # opts, no fat LTO), so full test links take seconds, not minutes.
-# target/ is cached per platform (actions/cache, swept before each
-# save; see "Two caches" below), so steady-state Windows runs are
-# minutes, not 20.
+# Build output is cached per platform (see .github/workflows/CACHING.md),
+# so steady-state Windows runs are minutes, not 20.
 #
 # Two payload gates beyond compilation, because compile success has
 # shipped dead binaries before (v3.3.0 ONNX feature leak):
@@ -193,41 +192,18 @@ jobs:
         run: |
           "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append
 
-      # Caching is described in prose in .github/workflows/CACHING.md;
-      # the comments below are the short version.
-      #
-      # Two caches, split by what each needs:
-      #   ~/.cargo  (registry, git deps, installed tools): rust-cache,
-      #             with its own keying, which already ignores
-      #             donsetch's version and falls back across lockfile
-      #             changes.
-      #   target/   (every compiled artifact): actions/cache below,
-      #             keyed on DEP_HASH, with a prefix fallback and a
-      #             sweep before saving.
-      #
-      # rust-cache no longer caches target/ because, on a fallback
-      # restore, it deletes every artifact COMPILED more than 7 days
-      # ago before the build runs. Cargo never rewrites a fresh
-      # artifact and an exact-hit run never re-saves, so that deletes
-      # most of the tree after any dependency bump, used or not.
-      #
-      # DEP_HASH (scripts/dep-hash.py) ignores donsetch's own version,
-      # so a release commit keeps an exact hit; real dependency,
-      # feature or profile changes produce a new hash.
+      # Caching is explained in .github/workflows/CACHING.md. Two caches:
+      # ~/.cargo via rust-cache, target/ via actions/cache with a sweep
+      # before saving. DEP_HASH ignores donsetch's own version, so a
+      # release commit keeps the cache warm.
       - name: Compute version-insensitive dep hash
         shell: bash
         run: echo "DEP_HASH=$(python3 scripts/dep-hash.py)" >> "$GITHUB_ENV"
 
-      # The build shape part of the target/ key. The windows lane is
-      # `tests: none` but builds the suite on every non-PR event, so its
-      # saved entries are test-shaped: key it `full` on EVERY event.
-      # A windows PR only runs `cargo check`, and a test-shaped tree
-      # holds everything check needs, so the PR restores master's entry
-      # instead of starting cold. That is safe only because pull
-      # requests never save (see "Save target/"): a check-shaped tree
-      # can never be written back under the `full` key, which is the
-      # poisoning #264 fixed (rmeta without codegen, 223 crates
-      # recompiled per test run).
+      # Build-shape part of the key. Windows is keyed `full` on every
+      # event, so its check-only PRs restore master's test-built tree.
+      # Safe only because PRs never save (CACHING.md, "Pull requests
+      # never save").
       - name: Compute cache kind
         shell: bash
         run: |
@@ -237,22 +213,10 @@ jobs:
           fi
           echo "CACHE_KIND=$KIND" >> "$GITHUB_ENV"
 
-      # target/ key: tgt-<target>-<kind>-<rustc>-v1-<DEP_HASH>-<WF_HASH>.
-      # Everything before DEP_HASH makes old artifacts useless (another
-      # target, build shape or compiler), so the fallback prefix stops
-      # there: on a key miss, GitHub restores the NEWEST entry matching
-      # the prefix, i.e. the previous state, and cargo's per-unit hashes
-      # decide what is reusable. A fallback can cost restore time, never
-      # correctness. Bump v1 to force a clean start.
-      #
-      # WF_HASH is this file's hash. Features, flags, env and steps all
-      # live here (the windows lane alone builds two feature sets), and
-      # without it a change to what a lane builds would keep an exact
-      # hit on a tree built another way, recompile the difference on
-      # every run and never re-save. With it, such a change falls back
-      # to the previous entry, recompiles only what really changed,
-      # sweeps and saves. CRLF is normalized so a Windows checkout
-      # hashes the same bytes.
+      # Key: tgt-<target>-<kind>-<rustc>-v1-<DEP_HASH>-<WF_HASH>. A miss
+      # falls back to the newest older entry. WF_HASH (this file) makes
+      # any change to how a lane builds re-save. Bump v1 for a cold
+      # reset. CACHING.md, "The target/ key".
       - name: Compute target/ cache key
         shell: bash
         run: |
@@ -263,35 +227,20 @@ jobs:
           echo "TARGET_CACHE_DEPS_PREFIX=${PREFIX}${DEP_HASH}-" >> "$GITHUB_ENV"
           echo "TARGET_CACHE_KEY=${PREFIX}${DEP_HASH}-${WF_HASH}" >> "$GITHUB_ENV"
 
-      # Measured 2026-09 (restore vs fetching the index, the quiche git
-      # fork and every crate from nothing): windows 19 s vs 37 s,
-      # macos-x86_64 10 s vs 38 s, linux 2 s vs 6-7 s, macos-arm64
-      # 13 s vs 11 s. A clear win on the slow-filesystem runners, and
-      # it spares crates.io and GitHub a full re-download per lane per
-      # run. Per OS and arch, not shared across lanes: rust-cache
-      # always keys on both, and cargo only downloads the crates the
-      # current platform and features need, so one lane's entry would
-      # not cover another's.
-      #
-      # MUST run before the target/ restore: on a partial match
-      # rust-cache walks target/ and deletes week-old artifacts even
-      # with cache-targets false, so target/ has to be empty then.
-      # Pinned to a SHA because the v2 tag moves, and a re-tag has
-      # changed that cleanup's behavior before (rust-cache #375/#377).
+      # ~/.cargo only (CACHING.md, "Two caches per lane"). MUST run
+      # before the target/ restore: on a partial match it cleans
+      # target/ even with cache-targets false. SHA-pinned: v2 moves.
       - name: Cache ~/.cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
           cache-targets: "false"
           cache-on-failure: "true"
-          # Pull requests never save, same reasons as target/ below.
+          # Pull requests never save, as for target/.
           save-if: ${{ github.event_name != 'pull_request' }}
 
-      # The windows runner ships with last-access updates disabled
-      # ("DisableLastAccess = 3, System Managed"), which would make the
-      # sweep below see every unit as unused and delete the whole tree.
-      # The change applies immediately, no reboot. Fails the job rather
-      # than risk that sweep.
+      # Windows runners ship with last-access updates off, which would
+      # make the sweep delete the whole tree. Fail rather than risk it.
       - name: Enable NTFS last-access updates (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -300,9 +249,8 @@ jobs:
           fsutil.exe behavior query disablelastaccess | tee lastaccess.txt
           grep -q 'Updates ENABLED' lastaccess.txt
 
-      # restore-keys, most specific first: the same key (this picks up a
-      # `-partial-` entry left by a red run), then the same dependencies
-      # under an older workflow, then any older state.
+      # Most specific first: the same key (finds a red run's -partial-
+      # entry), the same deps under an older workflow, any older state.
       - name: Restore target/
         id: target-cache
         uses: actions/cache/restore@v6
@@ -314,15 +262,9 @@ jobs:
             ${{ env.TARGET_CACHE_DEPS_PREFIX }}
             ${{ env.TARGET_CACHE_PREFIX }}
 
-      # The sweep before saving keeps a unit only if one of its
-      # .fingerprint files is READ after this point (cargo reads every
-      # unit's fingerprint on each build, fresh or not). `prepare` ages
-      # restored atimes (APFS will not move an atime that is newer than
-      # mtime) and writes the stamp; see scripts/ci-sweep.py. Nothing
-      # may read target/ between the restore and here: not even `du`,
-      # which on Windows (Git Bash) updates every file's atime. Only
-      # when a sweep will follow: no exact hit (entries are immutable,
-      # so an exact hit is never re-saved) and not a pull request.
+      # Marks the start of the build for the sweep (CACHING.md, "Keeping
+      # the cache bounded"). Nothing may read target/ between the
+      # restore and here, not even `du`.
       - name: Prepare target/ for the sweep
         if: steps.target-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
         shell: bash
@@ -405,23 +347,8 @@ jobs:
         run: cargo fmt --all -- --check
 
       # ── Save target/. Keep these the LAST steps: the sweep deletes
-      # every unit no earlier step read, so a cargo command after it
-      # would find its artifacts gone.
-      #
-      # Pull requests never save. A PR's cache is scoped to its merge
-      # ref (refs/pull/N/merge): only later runs of that same PR can
-      # restore it, never master or other PRs, and master's first push
-      # after the merge falls back to master's own entry anyway. A PR
-      # that does not touch dependencies gets an exact hit from
-      # master's entry and would not save regardless, so this only
-      # affects dependency-changing PRs, whose re-runs pay a partial
-      # rebuild of the bumped crates. What it avoids: ~0.5-1 GB per
-      # lane per such PR in the repo's shared 10 GB cache pool. GitHub
-      # evicts by last access, and a restore stamps master's entries
-      # at job START while PR saves land at job END, so a burst of
-      # dependency PRs (dependabot opens several at once) would evict
-      # master's entries first. Revisit, as "save on exact miss only",
-      # if those partial rebuilds turn out to hurt.
+      # whatever the earlier steps did not read. Pull requests never
+      # save (CACHING.md, "Pull requests never save").
 
       # Green run: keep only what this run used, drop donsetch's own
       # units (every commit rebuilds them), save under the exact key.
@@ -441,24 +368,10 @@ jobs:
           path: target
           key: ${{ env.TARGET_CACHE_KEY }}
 
-      # Red run (a timeout included): save UNSWEPT under a `-partial-`
-      # key, so the next run resumes instead of starting cold. Cargo
-      # records a unit only after it compiles, so a partial tree is
-      # never wrong, only incomplete. Unswept because the steps after
-      # the failure read nothing, and a sweep would delete exactly what
-      # the next run needs. Never under the exact key: an exact hit is
-      # never re-saved, so a partial tree there would stick until the
-      # dependencies change. The first green run after it saves the
-      # swept exact entry. failure() is false on cancellation.
-      #
-      # A step that hits its timeout-minutes is stopped, but the
-      # compilers cargo started keep running and writing into target/;
-      # tar then refuses the tree ("file changed as we read it") and
-      # the save fails with only a warning. So stop them first: SIGTERM
-      # before SIGKILL, because make and the C compilers in build
-      # scripts (boring-sys's CMake build) delete their half-written
-      # output on TERM but not on KILL, and a truncated object file with
-      # a fresh mtime would look up to date to the next make.
+      # Red run, timeouts included: save UNSWEPT under a -partial- key so
+      # the next run resumes (CACHING.md, "When a run fails"). First stop
+      # leftover compilers, which keep writing after a step times out;
+      # TERM before KILL so make and cc can delete half-written output.
       - name: Stop leftover build processes (red run)
         if: failure() && steps.target-cache.outcome == 'success' && steps.target-cache.outputs.cache-hit != 'true' && steps.sweep.outcome == 'skipped' && github.event_name != 'pull_request'
         shell: bash
