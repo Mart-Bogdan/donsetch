@@ -274,6 +274,21 @@ jobs:
             ${{ env.TARGET_CACHE_KEY }}
             ${{ env.TARGET_CACHE_PREFIX }}
 
+      # FORK-ONLY diagnostics: drop before upstream. Stat-only, so no
+      # access time in target/ is touched before the stamp.
+      - name: "DIAG: encoding, atime setting, restored size"
+        shell: bash
+        run: |
+          python3 -c "import locale,sys; print('python default encoding:', locale.getpreferredencoding(False), 'utf8_mode', sys.flags.utf8_mode)"
+          case "$RUNNER_OS" in
+            Linux)   findmnt -no SOURCE,FSTYPE,OPTIONS --target "$PWD" ;;
+            macOS)   mount | grep -E " on (/|/System/Volumes/Data) " ;;
+            Windows) fsutil.exe behavior query disablelastaccess; echo "workspace drive: $(pwd -W | cut -c1-2)" ;;
+          esac
+          echo "restore matched: ${{ steps.target-cache.outputs.cache-matched-key }} (exact hit: ${{ steps.target-cache.outputs.cache-hit }})"
+          du -sh target 2>/dev/null || echo "no target/"
+          python3 -c "import time; print(f'DIAG_T0={time.time()}')" >> "$GITHUB_ENV"
+
       - name: Install cargo-nextest and cargo-sweep
         uses: taiki-e/install-action@v2
         with:
@@ -379,6 +394,29 @@ jobs:
       # master's entries first. Revisit, as "save on exact miss only",
       # if those partial rebuilds turn out to hurt.
 
+      # FORK-ONLY: what the sweep will see. Per .fingerprint dir, units
+      # whose newest file atime is after DIAG_T0 (taken right after the
+      # restore) versus all units. Runs on every event, exact hit too,
+      # so it shows atime behavior even when nothing is swept.
+      - name: "DIAG: units read during this run"
+        if: always() && steps.target-cache.outcome == 'success'
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          import os, pathlib
+          t0 = float(os.environ["DIAG_T0"])
+          for fp in sorted(pathlib.Path("target").rglob(".fingerprint")):
+              units = [u for u in fp.iterdir() if u.is_dir()]
+              stale = []
+              for u in units:
+                  times = [f.stat().st_atime for f in u.iterdir() if f.is_file()]
+                  if not times or max(times) < t0:
+                      stale.append(u.name)
+              print(f"{fp}: {len(units)} units, {len(units) - len(stale)} read after T0, {len(stale)} not read")
+              for name in sorted(stale)[:25]:
+                  print(f"    not read: {name}")
+          EOF
+
       # Green run: keep only what this run used, drop donsetch's own
       # units (every commit rebuilds them), save under the exact key.
       - name: Sweep target/
@@ -396,6 +434,11 @@ jobs:
         with:
           path: target
           key: ${{ env.TARGET_CACHE_KEY }}
+
+      - name: "DIAG: target/ size at end (FORK-ONLY)"
+        if: always()
+        shell: bash
+        run: du -sh target 2>/dev/null || echo "no target/"
 
       # Red run (a timeout included): save UNSWEPT under a `-partial-`
       # key, so the next run resumes instead of starting cold. Cargo
@@ -433,7 +476,8 @@ jobs:
   # heavy set, on every platform.
   heavy:
     name: heavy (${{ matrix.name }})
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: false # FORK-ONLY: drop before upstream
+
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -470,6 +514,7 @@ jobs:
   # master pushes and nightly.
   fuzz:
     name: fuzz (${{ matrix.target }})
+    if: false # FORK-ONLY: drop before upstream
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
