@@ -310,14 +310,21 @@ jobs:
           python3 - <<'EOF'
           import os, time
           old_ns = 946684800 * 10**9
-          start, n = time.time(), 0
+          start, n, links, errors = time.time(), 0, 0, 0
           for root, _dirs, files in os.walk("target"):
               for name in files:
                   p = os.path.join(root, name)
-                  st = os.stat(p)
-                  os.utime(p, ns=(old_ns, st.st_mtime_ns))
-                  n += 1
-          print(f"aged atime of {n} files in {time.time() - start:.1f}s")
+                  if os.path.islink(p):
+                      links += 1
+                      continue
+                  try:
+                      st = os.stat(p)
+                      os.utime(p, ns=(old_ns, st.st_mtime_ns))
+                      n += 1
+                  except OSError as e:
+                      errors += 1
+                      print(f"skip {p}: {e}")
+          print(f"aged atime of {n} files in {time.time() - start:.1f}s ({links} symlinks skipped, {errors} errors)")
           EOF
 
       # FORK-ONLY diagnostics: drop before upstream. Stat-only, so no
