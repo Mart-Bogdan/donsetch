@@ -4,10 +4,18 @@
 use super::blocks::Block;
 use super::metadata::Meta;
 
+/// #292: every omission marker starts with this. The fetch layer
+/// counts the markers for `structuredContent.omitted_repeats`.
+pub(crate) const REPEATED_MARKER_PREFIX: &str = "*[repeated ";
+/// Duplicates of at least this many chars get an in-place marker;
+/// shorter ones (badges, one-liners) stay silent.
+const MIN_MARKED_DUP: usize = 24;
+
 pub fn render(meta: &Meta, url: &str, kept: &[&Block], opts: &super::ExtractOptions) -> String {
     // Repeated boilerplate sections collapse before rendering
-    // (#288): see `collapse_repeats`.
-    let kept = collapse_repeats(kept);
+    // (#288), and a marker takes a dropped section's place (#292):
+    // see `collapse_repeats`.
+    let (kept, omitted) = collapse_repeats(kept);
     let mut out = String::new();
 
     // Frontmatter : compact, agent-first.
@@ -52,7 +60,21 @@ pub fn render(meta: &Meta, url: &str, kept: &[&Block], opts: &super::ExtractOpti
     // Cross-block exact-duplicate suppression: badge
     // dupes, repeated teasers. Keyed on normalized text.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for block in &kept {
+    // #292: whether the previous block was a heading. A block that
+    // opens its own section is the section's content: a repeat
+    // there is structure, never boilerplate.
+    let mut prev_heading = false;
+    // Section markers, spliced at their recorded positions.
+    let mut markers = omitted.iter().peekable();
+    for (idx, block) in kept.iter().enumerate() {
+        while let Some((pos, marker)) = markers.peek() {
+            if *pos != idx {
+                break;
+            }
+            out.push_str(marker);
+            out.push_str("\n\n");
+            markers.next();
+        }
         match block {
             Block::Heading { level, text, .. } => {
                 // Skip the H1 that repeats the frontmatter title :
@@ -82,8 +104,16 @@ pub fn render(meta: &Meta, url: &str, kept: &[&Block], opts: &super::ExtractOpti
                 if looks_like_data_blob(md) {
                     continue;
                 }
-                if !seen.insert(normalize(md)) {
-                    continue; // exact duplicate of an earlier block
+                if !seen.insert(normalize(md)) && !prev_heading {
+                    // Exact duplicate of an earlier block (#292): a
+                    // section's own opener stays (structure), and
+                    // elsewhere the omission is visible, marked in
+                    // place. Tiny chrome dupes (badges) stay silent.
+                    if md.len() >= MIN_MARKED_DUP {
+                        out.push_str(&format!("{REPEATED_MARKER_PREFIX}block omitted]*"));
+                        out.push_str("\n\n");
+                    }
+                    continue;
                 }
                 // Bare numbers: vote counts, rank numbers.
                 if md.len() < 8 && md.chars().all(|c| c.is_ascii_digit() || c == ',') {
@@ -200,6 +230,12 @@ pub fn render(meta: &Meta, url: &str, kept: &[&Block], opts: &super::ExtractOpti
             }
         }
         last_was_heading = false;
+        prev_heading = matches!(block, Block::Heading { .. });
+    }
+    // A dropped section at the page's end still reports itself.
+    for (_, marker) in markers {
+        out.push_str(marker);
+        out.push_str("\n\n");
     }
 
     while out.ends_with('\n') {
@@ -209,20 +245,25 @@ pub fn render(meta: &Meta, url: &str, kept: &[&Block], opts: &super::ExtractOpti
     out
 }
 
-/// #288: repeated boilerplate sections. Upsell blocks repeat per
+/// #292: repeated boilerplate sections. Upsell blocks repeat per
 /// plan with the same heading and a near-identical body, and
 /// "Add to your order" headings stack. Two conservative collapses,
 /// applied before rendering:
 /// - an immediately repeated heading (same level, same normalized
 ///   text) is kept once;
 /// - a section whose normalized body repeats its predecessor's is
-///   dropped whole: the first copy already showed it. Bodies under
-///   160 normalized chars never qualify, so short same-named
-///   sections on one page survive ("Overview" twice is structure).
+///   dropped whole, and a marker takes its place, so the omission
+///   is never silent. Bodies under 160 normalized chars never
+///   qualify, so short same-named sections on one page survive
+///   ("Overview" twice is structure).
 ///
-/// Near-identical = equal after digits and punctuation are stripped,
-/// or a token-set Jaccard of 0.85 inside a 4k-char cap.
-fn collapse_repeats<'a>(kept: &[&'a Block]) -> Vec<&'a Block> {
+/// Near-identical = equal after digits and punctuation are
+/// stripped, or an order-sensitive token-3-gram Jaccard of 0.85
+/// inside a 4k-char cap. A section body carrying a Table only
+/// collapses on an exact repeat: there the digits are the content.
+/// Returns the kept blocks plus `(position, marker)` pairs to
+/// splice into the output before rendering.
+fn collapse_repeats<'a>(kept: &[&'a Block]) -> (Vec<&'a Block>, Vec<(usize, String)>) {
     const MIN_BODY: usize = 160;
     const JACCARD_MIN: f64 = 0.85;
     const JACCARD_CAP: usize = 4_000;
@@ -233,24 +274,45 @@ fn collapse_repeats<'a>(kept: &[&'a Block]) -> Vec<&'a Block> {
             .join(" ")
             .to_lowercase()
     }
-    fn norm_body(s: &str) -> String {
+    fn strip(s: &str) -> String {
         let stripped: String = s
             .chars()
             .filter(|c| !c.is_ascii_digit() && !c.is_ascii_punctuation())
             .collect();
         norm(&stripped)
     }
-    fn near_identical(a: &str, b: &str) -> bool {
+    fn trigrams(s: &str) -> std::collections::HashSet<String> {
+        let toks: Vec<&str> = s.split_whitespace().collect();
+        let mut set = std::collections::HashSet::new();
+        if toks.len() < 3 {
+            for t in toks {
+                set.insert(t.to_string());
+            }
+        } else {
+            for w in toks.windows(3) {
+                set.insert(format!("{} {} {}", w[0], w[1], w[2]));
+            }
+        }
+        set
+    }
+    fn near_identical(prev: &str, prev_table: bool, cur: &str, cur_table: bool) -> bool {
+        if prev == cur {
+            return true;
+        }
+        if prev_table || cur_table {
+            return false;
+        }
+        let (a, b) = (strip(prev), strip(cur));
+        if a.is_empty() || b.is_empty() {
+            return false;
+        }
         if a == b {
             return true;
         }
         if a.len() > JACCARD_CAP || b.len() > JACCARD_CAP {
             return false;
         }
-        let toks = |s: &str| -> std::collections::HashSet<String> {
-            s.split_whitespace().map(str::to_string).collect()
-        };
-        let (ta, tb) = (toks(a), toks(b));
+        let (ta, tb) = (trigrams(&a), trigrams(&b));
         if ta.is_empty() || tb.is_empty() {
             return false;
         }
@@ -260,7 +322,8 @@ fn collapse_repeats<'a>(kept: &[&'a Block]) -> Vec<&'a Block> {
     }
 
     let mut out: Vec<&Block> = Vec::with_capacity(kept.len());
-    let mut last_section: Option<(String, String)> = None;
+    let mut omitted: Vec<(usize, String)> = Vec::new();
+    let mut last_section: Option<(String, String, bool)> = None;
     let mut prev_heading: Option<(u8, String)> = None;
     let mut i = 0usize;
     while i < kept.len() {
@@ -285,22 +348,37 @@ fn collapse_repeats<'a>(kept: &[&'a Block]) -> Vec<&'a Block> {
                     }
                     end += 1;
                 }
-                let body = kept[i + 1..end]
+                let body_blocks = &kept[i + 1..end];
+                let body = body_blocks
                     .iter()
                     .map(|b| b.text())
                     .collect::<Vec<_>>()
                     .join(" ");
-                let nb = norm_body(&body);
+                let nb = norm(&body);
+                let has_table = body_blocks.iter().any(|b| matches!(b, Block::Table { .. }));
                 let repeated = nb.len() >= MIN_BODY
-                    && last_section
-                        .as_ref()
-                        .is_some_and(|(h2, b2)| h2 == &h && near_identical(b2, &nb));
+                    && last_section.as_ref().is_some_and(|(h2, b2, t2)| {
+                        h2 == &h && near_identical(b2, *t2, &nb, has_table)
+                    });
                 if repeated {
+                    // #292: the omission is visible, in position.
+                    let name: String = text
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .replace('"', "'")
+                        .chars()
+                        .take(60)
+                        .collect();
+                    omitted.push((
+                        out.len(),
+                        format!("{REPEATED_MARKER_PREFIX}section \"{name}\" omitted]*"),
+                    ));
                     i = end;
                     continue;
                 }
                 if nb.len() >= MIN_BODY {
-                    last_section = Some((h.clone(), nb));
+                    last_section = Some((h.clone(), nb, has_table));
                 } else {
                     last_section = None;
                 }
@@ -315,7 +393,7 @@ fn collapse_repeats<'a>(kept: &[&'a Block]) -> Vec<&'a Block> {
             }
         }
     }
-    out
+    (out, omitted)
 }
 
 /// Emit `list_items` output as markdown: "  " indentation per
@@ -454,9 +532,12 @@ mod repeat_collapse_tests {
             para(TERMS_B),
         ];
         let refs: Vec<&Block> = blocks.iter().collect();
-        let kept = collapse_repeats(&refs);
+        let (kept, omitted) = collapse_repeats(&refs);
         assert_eq!(kept.len(), 2, "one heading + one body survive");
         assert!(kept[1].text().contains("24.99"), "first copy kept");
+        // #292: dropped copies are marked, not silent.
+        assert_eq!(omitted.len(), 2);
+        assert!(omitted[0].1.contains("Product Protection"));
     }
 
     // Adjacent identical headings stack on real pages; keep one.
@@ -468,7 +549,8 @@ mod repeat_collapse_tests {
             para(TERMS_A),
         ];
         let refs: Vec<&Block> = blocks.iter().collect();
-        assert_eq!(collapse_repeats(&refs).len(), 2);
+        let (kept, _) = collapse_repeats(&refs);
+        assert_eq!(kept.len(), 2);
     }
 
     // Short same-named sections are structure, not boilerplate.
@@ -481,7 +563,8 @@ mod repeat_collapse_tests {
             para("Second part."),
         ];
         let refs: Vec<&Block> = blocks.iter().collect();
-        assert_eq!(collapse_repeats(&refs).len(), 4);
+        let (kept, _) = collapse_repeats(&refs);
+        assert_eq!(kept.len(), 4);
     }
 
     // Long sections with genuinely different bodies are content.
@@ -496,7 +579,129 @@ mod repeat_collapse_tests {
             para(&b),
         ];
         let refs: Vec<&Block> = blocks.iter().collect();
-        assert_eq!(collapse_repeats(&refs).len(), 4);
+        let (kept, _) = collapse_repeats(&refs);
+        assert_eq!(kept.len(), 4);
+    }
+
+    fn test_meta() -> Meta {
+        Meta {
+            title: None,
+            byline: None,
+            published: None,
+            site: None,
+            description: None,
+            canonical: None,
+        }
+    }
+
+    // #292: a section dropped as repeated leaves a marker in place;
+    // a reader sees that the page had more than it received.
+    #[test]
+    fn a_repeated_section_leaves_a_marker_in_place() {
+        let blocks = [
+            heading(3, "Product Protection by Asurion, LLC"),
+            para(TERMS_A),
+            heading(3, "Product Protection by Asurion, LLC"),
+            para(TERMS_B),
+        ];
+        let refs: Vec<&Block> = blocks.iter().collect();
+        let md = render(
+            &test_meta(),
+            "https://x/",
+            &refs,
+            &crate::extract::ExtractOptions::default(),
+        );
+        assert_eq!(
+            md.matches("*[repeated section \"Product Protection by Asurion, LLC\" omitted]*")
+                .count(),
+            1
+        );
+        assert_eq!(md.matches(TERMS_B).count(), 0, "the repeat is dropped");
+        assert_eq!(md.matches("24.99").count(), 1, "the first copy stays");
+    }
+
+    // #292: "Not applicable" under two different headings is two
+    // assertions, not boilerplate: the section opener is exempt.
+    #[test]
+    fn a_duplicate_right_under_its_heading_is_kept() {
+        let blocks = [
+            heading(2, "Warranty"),
+            para("Not applicable to this item."),
+            heading(2, "Returns"),
+            para("Not applicable to this item."),
+        ];
+        let refs: Vec<&Block> = blocks.iter().collect();
+        let md = render(
+            &test_meta(),
+            "https://x/",
+            &refs,
+            &crate::extract::ExtractOptions::default(),
+        );
+        assert_eq!(md.matches("Not applicable to this item.").count(), 2);
+        assert!(!md.contains(REPEATED_MARKER_PREFIX));
+    }
+
+    // #292: the four-times refrain from the report: one copy
+    // survives, every later repeat is marked where it stood.
+    #[test]
+    fn a_recurring_refrain_keeps_one_copy_and_marks_the_rest() {
+        let refrain =
+            "You load sixteen tons, and what do you get? Another day older and deeper in debt.";
+        let blocks = [
+            para(refrain),
+            para("Some people say a man is made out of mud."),
+            para(refrain),
+            para("A poor man's made out of muscle and blood."),
+            para(refrain),
+        ];
+        let refs: Vec<&Block> = blocks.iter().collect();
+        let md = render(
+            &test_meta(),
+            "https://x/",
+            &refs,
+            &crate::extract::ExtractOptions::default(),
+        );
+        assert_eq!(md.matches("sixteen tons").count(), 1);
+        assert_eq!(md.matches(REPEATED_MARKER_PREFIX).count(), 2);
+    }
+
+    // #292: in a table the digits are the content: two specification
+    // tables whose figures all differ must both survive; only an
+    // exact repeat collapses.
+    #[test]
+    fn a_table_section_only_collapses_on_an_exact_repeat() {
+        let mk = |base: u32| -> Block {
+            let rows = (0..20)
+                .map(|n| vec![format!("Model-{n}"), format!("{} volts", base + n)])
+                .collect();
+            Block::Table {
+                headers: vec!["Model".to_string(), "Voltage".to_string()],
+                rows,
+                truncated: false,
+                path: Vec::new(),
+            }
+        };
+        let differing = [
+            heading(2, "Specifications"),
+            mk(100),
+            heading(2, "Specifications"),
+            mk(500),
+        ];
+        let refs: Vec<&Block> = differing.iter().collect();
+        let (kept, omitted) = collapse_repeats(&refs);
+        assert_eq!(kept.len(), 4, "different figures are different content");
+        assert!(omitted.is_empty());
+
+        let same = [
+            heading(2, "Specifications"),
+            mk(100),
+            heading(2, "Specifications"),
+            mk(100),
+        ];
+        let refs: Vec<&Block> = same.iter().collect();
+        let (kept, omitted) = collapse_repeats(&refs);
+        assert_eq!(kept.len(), 2, "a byte-identical repeat still collapses");
+        assert_eq!(omitted.len(), 1);
     }
 
     // #288 item 3: an injected widget's JSON is dropped, and prose

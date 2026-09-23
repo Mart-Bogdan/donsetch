@@ -3616,6 +3616,16 @@ pub(super) fn finish_result(
     if ex.thin {
         structured["thin"] = json!(true);
     }
+    // #292: repeated blocks/sections were omitted and marked in
+    // place; the count makes the omission auditable without reading
+    // the whole page.
+    let omitted = ex
+        .markdown
+        .matches(crate::extract::render::REPEATED_MARKER_PREFIX)
+        .count();
+    if omitted > 0 {
+        structured["omitted_repeats"] = json!(omitted);
+    }
     if !matches!(ex.lang.as_str(), "" | "und" | "unknown") {
         structured["lang"] = json!(ex.lang);
     }

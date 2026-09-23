@@ -19,6 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   real SSR page comes back (1333-1551 chars with the post body on a
   live thread; listings too). When the `.json` endpoint answers,
   the path is unchanged (#291).
+- Repeated content no longer disappears silently. The
+  exact-duplicate rule ate every repeat after the first (a song's
+  refrain, a repeated clause) and a section dropped as
+  near-identical left no trace. Both rules now leave a marker in
+  place (`*[repeated block omitted]*`, `*[repeated section "X"
+  omitted]*`) and `structuredContent.omitted_repeats` counts them.
+  A paragraph that opens its own section is never dedupe-eligible,
+  section comparison is order-sensitive (token 3-grams), and a
+  section whose body carries a table only collapses on an exact
+  repeat: there the digits are the content (#292).
 
 ## [4.3.1] - 2026-09-23
 
