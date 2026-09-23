@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The README sponsors section is two sections now: "Our Sponsors"
+  holds the placements, starting with Fluxion AI (Gold, banner
+  pinned at the top), and "Sponsor this project" carries the
+  tiers and the ask.
+
 ### Fixed
 
 - pkg.go.dev URLs that pin a version (`/module@v1.2.3`) map to the
