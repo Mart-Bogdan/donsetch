@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section comparison is order-sensitive (token 3-grams), and a
   section whose body carries a table only collapses on an exact
   repeat: there the digits are the content (#292).
+- The docs-outline adapter no longer hijacks ordinary pages. It
+  detected Docusaurus by a bare `a.menu__link` class, which any BEM
+  menu can wear, and its own renderer had no `div` in its whitelist,
+  so a page whose content sits in divs came back as nav chrome with
+  the content erased, reported as success. Detection is the
+  framework's `div#__docusaurus` app root now (present on real
+  Docusaurus sites, absent from the false positive), and div-based
+  prose survives the adapter's renderer (#293).
 
 ## [4.3.1] - 2026-09-23
 
