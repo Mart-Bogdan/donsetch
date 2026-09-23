@@ -2,8 +2,9 @@
 #
 # Test runs use cargo-nextest with the `ci` cargo profile (release
 # opts, no fat LTO), so full test links take seconds, not minutes.
-# Deploy target/ artifacts are cached per platform (rust-cache), so
-# steady-state Windows runs are minutes, not 20.
+# target/ is cached per platform (actions/cache, swept before each
+# save; see "Two caches" below), so steady-state Windows runs are
+# minutes, not 20.
 #
 # Two payload gates beyond compilation, because compile success has
 # shipped dead binaries before (v3.3.0 ONNX feature leak):
@@ -192,35 +193,27 @@ jobs:
         run: |
           "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append
 
-      # Cache key: <target>-<CACHE_KIND>-dep-<DEP_HASH>-ci1.
-      # DEP_HASH hashes Cargo.lock + Cargo.toml with `version`
-      # lines stripped. That is the single most important line in
-      # this workflow: a release commit bumps the version in
-      # Cargo.toml, which under rust-cache's DEFAULT keying
-      # invalidates the whole dependency cache on every release
-      # and turns every tag build into a 15-25 min cold rebuild
-      # across 5 platforms. With version stripped, releases build
-      # warm: only donsetch itself recompiles. Real dependency or
-      # profile changes still change the hash and invalidate
-      # correctly. CI and release use separate suffixes so the
-      # release build's RUSTFLAGS artifacts never churn CI's.
+      # Two caches, split by what each needs:
+      #   ~/.cargo  (registry, git deps, installed tools): rust-cache,
+      #             with its own keying, which already ignores
+      #             donsetch's version and falls back across lockfile
+      #             changes.
+      #   target/   (every compiled artifact): actions/cache below,
+      #             keyed on DEP_HASH, with a prefix fallback and a
+      #             sweep before saving.
+      #
+      # rust-cache no longer caches target/ because, on a fallback
+      # restore, it deletes every artifact COMPILED more than 7 days
+      # ago before the build runs. Cargo never rewrites a fresh
+      # artifact and an exact-hit run never re-saves, so that deletes
+      # most of the tree after any dependency bump, used or not.
+      #
+      # DEP_HASH (scripts/dep-hash.py) ignores donsetch's own version,
+      # so a release commit keeps an exact hit; real dependency,
+      # feature or profile changes produce a new hash.
       - name: Compute version-insensitive dep hash
         shell: bash
-        run: |
-          DEP_HASH=$(python3 - <<'EOF'
-          import hashlib, pathlib, re
-          h = hashlib.sha256()
-          lock = pathlib.Path('Cargo.lock').read_text()
-          lock = re.sub(r'name = "donsetch"\nversion = "[^"]+"',
-                        'name = "donsetch"', lock)
-          h.update(lock.encode())
-          for p in sorted(pathlib.Path('.').rglob('Cargo.toml')):
-              t = re.sub(r'\n\s*version\s*=\s*"[^"]*"', '', p.read_text())
-              h.update(p.name.encode()); h.update(t.encode())
-          print(h.hexdigest()[:16])
-          EOF
-          )
-          echo "DEP_HASH=$DEP_HASH" >> "$GITHUB_ENV"
+        run: echo "DEP_HASH=$(python3 scripts/dep-hash.py)" >> "$GITHUB_ENV"
 
       # What this job actually BUILDS, which is not always what the
       # matrix declares: the windows lane is `tests: none` and still
@@ -242,19 +235,59 @@ jobs:
           fi
           echo "CACHE_KIND=$KIND" >> "$GITHUB_ENV"
 
-      - name: Cache cargo + target
-        uses: Swatinem/rust-cache@v2
+      # target/ key: tgt-<target>-<kind>-<rustc>-v1-<DEP_HASH>.
+      # Everything before DEP_HASH makes old artifacts useless (another
+      # target, build shape or compiler), so the fallback prefix stops
+      # there: on a key miss, GitHub restores the NEWEST entry matching
+      # the prefix, i.e. the previous dependency state, and cargo's
+      # per-unit hashes decide what is reusable. A fallback can cost
+      # restore time, never correctness. Bump v1 to force a clean start.
+      - name: Compute target/ cache key
+        shell: bash
+        run: |
+          RUSTC=$(rustc -vV | sed -n 's/^commit-hash: //p' | cut -c1-9)
+          PREFIX="tgt-${{ matrix.target }}-${CACHE_KIND}-${RUSTC}-v1-"
+          echo "TARGET_CACHE_PREFIX=$PREFIX" >> "$GITHUB_ENV"
+          echo "TARGET_CACHE_KEY=${PREFIX}${DEP_HASH}" >> "$GITHUB_ENV"
+
+      # MUST run before the target/ restore: on a partial match
+      # rust-cache walks target/ and deletes week-old artifacts even
+      # with cache-targets false, so target/ has to be empty then.
+      # Pinned to a SHA because the v2 tag moves, and a re-tag has
+      # changed that cleanup's behavior before (rust-cache #375/#377).
+      - name: Cache ~/.cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: ${{ matrix.target }}-${{ env.CACHE_KIND }}-dep-${{ env.DEP_HASH }}-ci1
-          add-rust-environment-hash-key: "false"
-          # A red run must still warm the cache: the next push is
-          # right behind it and should not pay full price again.
+          key: ${{ matrix.target }}
+          cache-targets: "false"
           cache-on-failure: "true"
 
-      - name: Install cargo-nextest
+      # restore-keys: first the same dependency state (this picks up a
+      # `-partial-` entry left by a red run), then any older state.
+      - name: Restore target/
+        id: target-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: target
+          key: ${{ env.TARGET_CACHE_KEY }}
+          restore-keys: |
+            ${{ env.TARGET_CACHE_KEY }}
+            ${{ env.TARGET_CACHE_PREFIX }}
+
+      - name: Install cargo-nextest and cargo-sweep
         uses: taiki-e/install-action@v2
         with:
-          tool: nextest
+          tool: nextest,cargo-sweep
+
+      # cargo-sweep keeps a unit only if one of its .fingerprint files
+      # was READ after this stamp (atime); cargo reads every unit's
+      # fingerprint on each build, fresh or not. So nothing may read
+      # target/ between the restore and this step. Skipped on an exact
+      # hit: nothing is saved then (cache entries are immutable).
+      - name: Stamp target/ for the sweep
+        if: steps.target-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: cargo sweep --stamp
 
       # Full suite on the lanes with a native, warm toolchain. This step
       # is also the COLD BUILD (a PR branch starts with an empty
@@ -326,6 +359,59 @@ jobs:
       - name: Format check
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
+
+      # ── Save target/. Keep these the LAST steps: the sweep deletes
+      # every unit no earlier step read, so a cargo command after it
+      # would find its artifacts gone.
+      #
+      # Pull requests never save. A PR's cache is scoped to its merge
+      # ref (refs/pull/N/merge): only later runs of that same PR can
+      # restore it, never master or other PRs, and master's first push
+      # after the merge falls back to master's own entry anyway. A PR
+      # that does not touch dependencies gets an exact hit from
+      # master's entry and would not save regardless, so this only
+      # affects dependency-changing PRs, whose re-runs pay a partial
+      # rebuild of the bumped crates. What it avoids: ~0.5-1 GB per
+      # lane per such PR in the repo's shared 10 GB cache pool. GitHub
+      # evicts by last access, and a restore stamps master's entries
+      # at job START while PR saves land at job END, so a burst of
+      # dependency PRs (dependabot opens several at once) would evict
+      # master's entries first. Revisit, as "save on exact miss only",
+      # if those partial rebuilds turn out to hurt.
+
+      # Green run: keep only what this run used, drop donsetch's own
+      # units (every commit rebuilds them), save under the exact key.
+      - name: Sweep target/
+        id: sweep
+        if: success() && steps.target-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          cargo sweep --file
+          cargo clean -p donsetch --profile ci --target ${{ matrix.target }}
+          cargo clean -p donsetch --profile ci
+
+      - name: Save target/
+        if: success() && steps.target-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
+        uses: actions/cache/save@v6
+        with:
+          path: target
+          key: ${{ env.TARGET_CACHE_KEY }}
+
+      # Red run (a timeout included): save UNSWEPT under a `-partial-`
+      # key, so the next run resumes instead of starting cold. Cargo
+      # records a unit only after it compiles, so a partial tree is
+      # never wrong, only incomplete. Unswept because the steps after
+      # the failure read nothing, and a sweep would delete exactly what
+      # the next run needs. Never under the exact key: an exact hit is
+      # never re-saved, so a partial tree there would stick until the
+      # dependencies change. The first green run after it saves the
+      # swept exact entry. failure() is false on cancellation.
+      - name: Save partial target/ (red run, unswept)
+        if: failure() && steps.target-cache.outcome == 'success' && steps.target-cache.outputs.cache-hit != 'true' && steps.sweep.outcome == 'skipped' && github.event_name != 'pull_request'
+        uses: actions/cache/save@v6
+        with:
+          path: target
+          key: ${{ env.TARGET_CACHE_KEY }}-partial-${{ github.run_id }}-${{ github.run_attempt }}
 
   # ── Supply chain: licenses + RustSec advisories + sources ──
   supply-chain:
