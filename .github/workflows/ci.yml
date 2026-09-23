@@ -215,22 +215,21 @@ jobs:
         shell: bash
         run: echo "DEP_HASH=$(python3 scripts/dep-hash.py)" >> "$GITHUB_ENV"
 
-      # What this job actually BUILDS, which is not always what the
-      # matrix declares: the windows lane is `tests: none` and still
-      # builds the suite on every non-PR event (mirrors the `if:` on
-      # "Test (nextest, Windows core suite, non-PR)" below). The two
-      # shapes must not share a cache entry : `cargo check` leaves
-      # rmeta and no codegen, so a test build that restores a
-      # check-shaped entry recompiles the whole dependency tree, and
-      # rust-cache does not re-save on an exact key hit, so the
-      # wrong shape sticks until DEP_HASH moves. That is what the
-      # windows lane has been doing since it started running tests:
-      # 223 crates recompiled per run, ~7 min.
+      # The build shape part of the target/ key. The windows lane is
+      # `tests: none` but builds the suite on every non-PR event, so its
+      # saved entries are test-shaped: key it `full` on EVERY event.
+      # A windows PR only runs `cargo check`, and a test-shaped tree
+      # holds everything check needs, so the PR restores master's entry
+      # instead of starting cold. That is safe only because pull
+      # requests never save (see "Save target/"): a check-shaped tree
+      # can never be written back under the `full` key, which is the
+      # poisoning #264 fixed (rmeta without codegen, 223 crates
+      # recompiled per test run).
       - name: Compute cache kind
         shell: bash
         run: |
           KIND='${{ matrix.tests }}'
-          if [ '${{ matrix.name }}' = 'windows-x86_64' ] && [ '${{ github.event_name }}' != 'pull_request' ]; then
+          if [ '${{ matrix.name }}' = 'windows-x86_64' ]; then
             KIND=full
           fi
           echo "CACHE_KIND=$KIND" >> "$GITHUB_ENV"
@@ -271,18 +270,21 @@ jobs:
           key: ${{ matrix.target }}
           cache-targets: "false"
           cache-on-failure: "true"
+          # Pull requests never save, same reasons as target/ below.
+          save-if: ${{ github.event_name != 'pull_request' }}
 
-      # EXPERIMENT: the windows runner ships with last-access updates
-      # disabled ("DisableLastAccess = 3, System Managed"), which blinds
-      # cargo-sweep. Try switching them on before anything is restored.
-      - name: "EXPERIMENT: enable NTFS last-access updates (Windows)"
+      # The windows runner ships with last-access updates disabled
+      # ("DisableLastAccess = 3, System Managed"), which would make the
+      # sweep below see every unit as unused and delete the whole tree.
+      # The change applies immediately, no reboot. Fails the job rather
+      # than risk that sweep.
+      - name: Enable NTFS last-access updates (Windows)
         if: runner.os == 'Windows'
-        continue-on-error: true
         shell: bash
         run: |
-          fsutil.exe behavior query disablelastaccess
           fsutil.exe behavior set disablelastaccess 0
-          fsutil.exe behavior query disablelastaccess
+          fsutil.exe behavior query disablelastaccess | tee lastaccess.txt
+          grep -q 'Updates ENABLED' lastaccess.txt
 
       # restore-keys: first the same dependency state (this picks up a
       # `-partial-` entry left by a red run), then any older state.
@@ -296,39 +298,9 @@ jobs:
             ${{ env.TARGET_CACHE_KEY }}
             ${{ env.TARGET_CACHE_PREFIX }}
 
-      # EXPERIMENT: macOS (APFS) did not update the atime of restored
-      # files on read. Hypothesis: it only updates when atime <= mtime,
-      # and extraction leaves atime newer. Push every restored file's
-      # atime to 2000-01-01, mtime preserved to the nanosecond (cargo
-      # decides freshness by mtime), so the first real read moves it.
-      # Unconditional for this experiment; a real version would run
-      # only when a sweep will follow (no exact hit).
-      - name: "EXPERIMENT: age restored atimes"
-        if: steps.target-cache.outcome == 'success'
-        shell: bash
-        run: |
-          python3 - <<'EOF'
-          import os, time
-          old_ns = 946684800 * 10**9
-          start, n, links, errors = time.time(), 0, 0, 0
-          for root, _dirs, files in os.walk("target"):
-              for name in files:
-                  p = os.path.join(root, name)
-                  if os.path.islink(p):
-                      links += 1
-                      continue
-                  try:
-                      st = os.stat(p)
-                      os.utime(p, ns=(old_ns, st.st_mtime_ns))
-                      n += 1
-                  except OSError as e:
-                      errors += 1
-                      print(f"skip {p}: {e}")
-          print(f"aged atime of {n} files in {time.time() - start:.1f}s ({links} symlinks skipped, {errors} errors)")
-          EOF
-
-      # FORK-ONLY diagnostics: drop before upstream. Stat-only, so no
-      # access time in target/ is touched before the stamp.
+      # FORK-ONLY diagnostics: drop before upstream. MUST stay before
+      # "Prepare target/": on Windows, Git Bash's `du` updates the atime
+      # of every file it sizes, which made every unit look used.
       - name: "DIAG: encoding, atime setting, restored size"
         shell: bash
         run: |
@@ -342,20 +314,24 @@ jobs:
           du -sh target 2>/dev/null || echo "no target/"
           python3 -c "import time; print(f'DIAG_T0={time.time()}')" >> "$GITHUB_ENV"
 
-      - name: Install cargo-nextest and cargo-sweep
+      # The sweep before saving keeps a unit only if one of its
+      # .fingerprint files is READ after this point (cargo reads every
+      # unit's fingerprint on each build, fresh or not). `prepare` ages
+      # restored atimes (APFS will not move an atime that is newer than
+      # mtime) and writes the stamp; see scripts/ci-sweep.py. Nothing
+      # may read target/ between the restore and here: not even `du`,
+      # which on Windows (Git Bash) updates every file's atime. Only
+      # when a sweep will follow: no exact hit (entries are immutable,
+      # so an exact hit is never re-saved) and not a pull request.
+      - name: Prepare target/ for the sweep
+        if: steps.target-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
+        shell: bash
+        run: python3 scripts/ci-sweep.py prepare
+
+      - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
-          tool: nextest,cargo-sweep
-
-      # cargo-sweep keeps a unit only if one of its .fingerprint files
-      # was READ after this stamp (atime); cargo reads every unit's
-      # fingerprint on each build, fresh or not. So nothing may read
-      # target/ between the restore and this step. Skipped on an exact
-      # hit: nothing is saved then (cache entries are immutable).
-      - name: Stamp target/ for the sweep
-        if: steps.target-cache.outputs.cache-hit != 'true'
-        shell: bash
-        run: cargo sweep --stamp
+          tool: nextest
 
       # Full suite on the lanes with a native, warm toolchain. This step
       # is also the COLD BUILD (a PR branch starts with an empty
@@ -477,7 +453,7 @@ jobs:
         if: success() && steps.target-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
         shell: bash
         run: |
-          cargo sweep --file
+          python3 scripts/ci-sweep.py sweep
           cargo clean -p donsetch --profile ci --target ${{ matrix.target }}
           cargo clean -p donsetch --profile ci
 
