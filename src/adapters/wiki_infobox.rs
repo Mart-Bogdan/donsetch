@@ -88,7 +88,7 @@ pub fn extract(html: &str, url: &str, opts: &ExtractOptions) -> Option<Extracted
     let body = doc.select(&body_sel).next()?;
     let mut body_opts = opts.clone();
     body_opts.max_chars = None; // paginate once, below, after prepending
-    let body_md = render_blocks(body, url, &body_opts);
+    let body_md = render_markdown_blocks(body, url, &body_opts);
 
     let mut full = md;
     full.push_str(&body_md);
@@ -222,9 +222,11 @@ fn is_furniture(el: ElementRef) -> bool {
     }
 }
 
-/// Minimal block walk over the article body: headings, paragraphs,
+/// Minimal block walk over an article body: headings, paragraphs,
 /// lists, tables, code : furniture skipped at the element level.
-fn render_blocks(root: ElementRef, url: &str, opts: &ExtractOptions) -> String {
+/// Shared with the reddit wiki renderer (a wiki page is a whole
+/// document, not one paragraph).
+pub(crate) fn render_markdown_blocks(root: ElementRef, url: &str, opts: &ExtractOptions) -> String {
     let mut out = String::new();
     let mut opts = opts.clone();
     opts.include_links = true; // interwiki links are the point of wiki
@@ -236,7 +238,7 @@ fn render_blocks(root: ElementRef, url: &str, opts: &ExtractOptions) -> String {
             continue;
         }
         match el.value().name() {
-            "h2" | "h3" | "h4" => {
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 let t = plain_text(el);
                 if !t.is_empty() {
                     let level = el.value().name().as_bytes()[1] - b'0';
@@ -269,7 +271,7 @@ fn render_blocks(root: ElementRef, url: &str, opts: &ExtractOptions) -> String {
             }
             "div" | "section" => {
                 // Recurse one level (gallery, columns…).
-                let inner = render_blocks(el, url, &opts);
+                let inner = render_markdown_blocks(el, url, &opts);
                 if !inner.is_empty() {
                     out.push_str(&inner);
                 }

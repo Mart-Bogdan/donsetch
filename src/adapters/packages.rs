@@ -119,7 +119,7 @@ fn render(registry: &str, c: &PkgCard) -> String {
         facts.push(format!("license {l}"));
     }
     if let Some(d) = c.downloads {
-        facts.push(format!("{} downloads", human_count(d)));
+        facts.push(format!("{} downloads", super::human_count(d)));
     }
     md.push_str(&format!("{}\n", facts.join(" · ")));
     for e in &c.extra {
@@ -681,16 +681,6 @@ fn clean_license(l: &str) -> String {
         l.chars().take(40).collect()
     } else {
         l.to_string()
-    }
-}
-
-fn human_count(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
     }
 }
 

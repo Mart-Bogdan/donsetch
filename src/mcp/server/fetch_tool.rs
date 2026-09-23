@@ -676,6 +676,40 @@ fn adapter_hop_failed(verdict: Verdict, adapter_host: bool, no_adapter: bool) ->
     adapter_host && !no_adapter && !matches!(verdict, Verdict::ContentOk)
 }
 
+/// One legacy-host navigation to seed the reddit session (#291
+/// follow-through): any old.reddit.com response runs its login
+/// flow and seeds the cookies `www.reddit.com` needs before it
+/// serves the real SSR page instead of the humanity interstitial
+/// or the JS shell. The body is discarded; the side effect is the
+/// cookie jar. Returns whether a navigation actually ran.
+async fn reddit_session_hop(daemon: &Arc<Daemon>, u: &url::Url, trace: &mut Trace) -> bool {
+    let Some(oldu) = crate::adapters::reddit_session_url(u) else {
+        return false;
+    };
+    let t0 = std::time::Instant::now();
+    let hop = daemon.fetcher.fetch_persona(&oldu, None).await;
+    trace.step(
+        "1",
+        "reddit-session",
+        &format!("status={}", hop.as_ref().map_or(0, |o| o.status)),
+        t0.elapsed().as_millis(),
+    );
+    true
+}
+
+/// A reddit page refusal at tier 1 that one session-init retry can
+/// fix (the content host serves the humanity page or the JS shell
+/// to a sessionless client). Never twice (`_reddit_session`
+/// guard), never off the content host.
+fn reddit_session_retry_eligible(verdict: &Verdict, host: &str, args: &Value) -> bool {
+    matches!(verdict, Verdict::Challenge(_) | Verdict::Blocked)
+        && matches!(host, "www.reddit.com" | "reddit.com")
+        && !args
+            .get("_reddit_session")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
 /// Retry the caller's URL without the adapter rewrite, and fold the
 /// adapter hop's trail in front of the retry's so the escalation
 /// reads as ONE ladder rather than two unrelated hops. The retry
@@ -694,32 +728,31 @@ async fn adapter_fallback(
     // One navigation through the legacy host first (body unused):
     // it initializes the reddit.com session cookies the caller's
     // host needs before it serves its real SSR page instead of the
-    // JS shell, and on some networks it serves content directly.
-    // The retry below then serves the content, with the session in
-    // the jar. Live A/B: without the hop the retry got an 8.5 KB
-    // shell (257 chars); with it, the 1 MB SSR page (1551 chars,
-    // post body).
-    if let Some(oldu) = url::Url::parse(orig_url)
+    // JS shell. The retry below then serves the content, with the
+    // session in the jar. Live A/B: without the hop the retry got
+    // an 8.5 KB shell (257 chars); with it, the 1 MB SSR page
+    // (1551 chars, post body).
+    let hop_done = match url::Url::parse(orig_url) {
+        Ok(pu) => reddit_session_hop(daemon, &pu, trace).await,
+        Err(_) => false,
+    };
+    // Legacy-host caller URLs retry on the content host: `old.`/
+    // `np.` serve a login wall to anonymous clients, so the retry
+    // there could never succeed.
+    let retry_url = url::Url::parse(orig_url)
         .ok()
-        .and_then(|u| crate::adapters::reddit_old_json_variant(&u))
-    {
-        let t0 = std::time::Instant::now();
-        let hop = daemon.fetcher.fetch_persona(&oldu, None).await;
-        let status = hop.as_ref().map_or(0, |o| o.status);
-        trace.step(
-            "1",
-            "reddit-old-hop",
-            &format!("status={status}"),
-            t0.elapsed().as_millis(),
-        );
-    }
+        .and_then(|u| crate::adapters::reddit_content_url(&u))
+        .unwrap_or_else(|| orig_url.to_string());
     let prior = match trace.value() {
         Value::Array(a) => a,
         _ => Vec::new(),
     };
     let mut args2 = args.clone();
     args2["_no_adapter"] = json!(true);
-    let mut res = Box::pin(fetch_single_inner(daemon, &args2, orig_url)).await;
+    // The hop just ran: don't let the session retry pay for a
+    // second one.
+    args2["_reddit_session"] = json!(hop_done);
+    let mut res = Box::pin(fetch_single_inner(daemon, &args2, &retry_url)).await;
     if let Some(sc) = res.pointer_mut("/structuredContent") {
         sc["adapter_fallback"] = json!(true);
     }
@@ -1162,6 +1195,30 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
                 let why = format!("{:?} : retrying original URL", o.verdict);
                 return adapter_fallback(daemon, args, &orig_url, &mut trace, "fallback", &why)
                     .await;
+            }
+            // A reddit page (thread, listing, about, wiki) refused
+            // at tier 1 without a session: the humanity page or the
+            // shell. One legacy-host navigation seeds the session,
+            // the retry gets the real SSR page, and the SSR adapter
+            // turns that into the card. Cheap enough to try before
+            // any ghost pass, on tier 1 and on auto alike.
+            _ if reddit_session_retry_eligible(&o.verdict, &host, args) => {
+                let hop_done = match url::Url::parse(&url) {
+                    Ok(pu) => reddit_session_hop(daemon, &pu, &mut trace).await,
+                    Err(_) => false,
+                };
+                let prior = match trace.value() {
+                    Value::Array(a) => a,
+                    _ => Vec::new(),
+                };
+                let mut args2 = args.clone();
+                args2["_reddit_session"] = json!(true);
+                let mut res = Box::pin(fetch_single_inner(daemon, &args2, &url)).await;
+                if let Some(sc) = res.pointer_mut("/structuredContent") {
+                    sc["reddit_session"] = json!(hop_done);
+                }
+                fold_trace_into_result(&mut res, prior);
+                return res;
             }
             Verdict::Challenge(_) if tier != "1" => {}
             v => {
@@ -4188,6 +4245,42 @@ mod adapter_hop_tests {
         ));
         // The retry itself must not bounce (`_no_adapter`).
         assert!(!adapter_hop_failed(Verdict::Blocked, true, true));
+    }
+
+    // The session retry: reddit page refusals at tier 1 get one
+    // session-init attempt; never twice, never off the content host.
+    #[test]
+    fn reddit_session_retry_eligibility() {
+        let args = serde_json::json!({});
+        assert!(reddit_session_retry_eligible(
+            &Verdict::Challenge(Vendor::Generic),
+            "www.reddit.com",
+            &args
+        ));
+        assert!(reddit_session_retry_eligible(
+            &Verdict::Blocked,
+            "reddit.com",
+            &args
+        ));
+        // Other hosts keep their own escalation rules.
+        assert!(!reddit_session_retry_eligible(
+            &Verdict::Blocked,
+            "registry.npmjs.org",
+            &args
+        ));
+        // Served content is content.
+        assert!(!reddit_session_retry_eligible(
+            &Verdict::ContentOk,
+            "www.reddit.com",
+            &args
+        ));
+        // The retry is one-shot.
+        let done = serde_json::json!({"_reddit_session": true});
+        assert!(!reddit_session_retry_eligible(
+            &Verdict::Blocked,
+            "www.reddit.com",
+            &done
+        ));
     }
 
     // The adapter hop's steps fold in FRONT of the retry's own trail

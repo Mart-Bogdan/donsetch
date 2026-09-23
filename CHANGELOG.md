@@ -47,6 +47,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fetch returned 16 KB of JSON). `must_contain` still runs as a
   probe.
 
+- Reddit renders one clean card for every URL shape, on both
+  paths. The shreddit SSR adapter is new: threads with the full
+  comment tree (scores, ages, nesting, hidden-reply counts), the
+  post body, listings with the server-rendered posts and an
+  honest feed-cut note, subreddit about pages with rules, wiki
+  pages with the whole document and its revision stamp, all
+  through the same formatting helpers the `.json` adapter uses.
+  Where the `.json` endpoint refuses, the page path now lands in
+  the same cards instead of generic chrome: a live thread went
+  from 1546 chars of navigation text to a 6437-char card with 25
+  of 39 comments.
+- Reddit's session init is a first-class step now, not an accident
+  of a failed `.json` hop: a reddit page that refuses at tier 1
+  (the humanity interstitial, the JS shell) gets one legacy-host
+  navigation and one retry, on tier 1 and auto alike. A live wiki
+  page (which has no `.json` at all) went from a bot wall to the
+  full document on a cold jar.
+- Reddit URL coverage: user pages (`/user/<name>` -> profile card,
+  `/comments` and `/submitted` -> activity cards), subreddit about
+  pages (`/about`, `/about/rules`), and the legacy hosts:
+  `old.reddit.com`/`np.reddit.com` content URLs rewrite onto www
+  (they serve a login wall to anonymous clients) and fallback
+  retries ride the content host. Wiki pages and share links (`/s/`)
+  stay pages (no JSON shape); `redd.it` shortlinks resolve through
+  the redirect into the thread card.
+
 ## [4.3.2] - 2026-09-23
 
 ### Fixed
