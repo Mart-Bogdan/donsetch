@@ -252,15 +252,15 @@ jobs:
           echo "TARGET_CACHE_PREFIX=$PREFIX" >> "$GITHUB_ENV"
           echo "TARGET_CACHE_KEY=${PREFIX}${DEP_HASH}" >> "$GITHUB_ENV"
 
-      # Honest accounting: this entry buys little time. From nothing,
-      # the crates.io index, the quiche git fork and every crate
-      # download took ~6 s (linux-aarch64, 2026-09); restoring the
-      # entry takes a few seconds itself. It is kept to spare
-      # crates.io and GitHub a full re-download per lane per run, and
-      # to keep runs working through a registry outage. Per OS and
-      # arch, not shared across lanes: rust-cache always keys on both,
-      # and cargo only downloads the crates the current platform and
-      # features need, so one lane's entry would not cover another's.
+      # Measured 2026-09 (restore vs fetching the index, the quiche git
+      # fork and every crate from nothing): windows 19 s vs 37 s,
+      # macos-x86_64 10 s vs 38 s, linux 2 s vs 6-7 s, macos-arm64
+      # 13 s vs 11 s. A clear win on the slow-filesystem runners, and
+      # it spares crates.io and GitHub a full re-download per lane per
+      # run. Per OS and arch, not shared across lanes: rust-cache
+      # always keys on both, and cargo only downloads the crates the
+      # current platform and features need, so one lane's entry would
+      # not cover another's.
       #
       # MUST run before the target/ restore: on a partial match
       # rust-cache walks target/ and deletes week-old artifacts even
