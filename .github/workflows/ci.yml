@@ -272,6 +272,18 @@ jobs:
           cache-targets: "false"
           cache-on-failure: "true"
 
+      # EXPERIMENT: the windows runner ships with last-access updates
+      # disabled ("DisableLastAccess = 3, System Managed"), which blinds
+      # cargo-sweep. Try switching them on before anything is restored.
+      - name: "EXPERIMENT: enable NTFS last-access updates (Windows)"
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: bash
+        run: |
+          fsutil.exe behavior query disablelastaccess
+          fsutil.exe behavior set disablelastaccess 0
+          fsutil.exe behavior query disablelastaccess
+
       # restore-keys: first the same dependency state (this picks up a
       # `-partial-` entry left by a red run), then any older state.
       - name: Restore target/
@@ -283,6 +295,30 @@ jobs:
           restore-keys: |
             ${{ env.TARGET_CACHE_KEY }}
             ${{ env.TARGET_CACHE_PREFIX }}
+
+      # EXPERIMENT: macOS (APFS) did not update the atime of restored
+      # files on read. Hypothesis: it only updates when atime <= mtime,
+      # and extraction leaves atime newer. Push every restored file's
+      # atime to 2000-01-01, mtime preserved to the nanosecond (cargo
+      # decides freshness by mtime), so the first real read moves it.
+      # Unconditional for this experiment; a real version would run
+      # only when a sweep will follow (no exact hit).
+      - name: "EXPERIMENT: age restored atimes"
+        if: steps.target-cache.outcome == 'success'
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          import os, time
+          old_ns = 946684800 * 10**9
+          start, n = time.time(), 0
+          for root, _dirs, files in os.walk("target"):
+              for name in files:
+                  p = os.path.join(root, name)
+                  st = os.stat(p)
+                  os.utime(p, ns=(old_ns, st.st_mtime_ns))
+                  n += 1
+          print(f"aged atime of {n} files in {time.time() - start:.1f}s")
+          EOF
 
       # FORK-ONLY diagnostics: drop before upstream. Stat-only, so no
       # access time in target/ is touched before the stamp.
