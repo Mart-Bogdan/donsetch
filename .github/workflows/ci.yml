@@ -441,19 +441,27 @@ jobs:
       # A step that hits its timeout-minutes is stopped, but the
       # compilers cargo started keep running and writing into target/;
       # tar then refuses the tree ("file changed as we read it") and
-      # the save fails with only a warning. So stop them first.
+      # the save fails with only a warning. So stop them first: SIGTERM
+      # before SIGKILL, because make and the C compilers in build
+      # scripts (boring-sys's CMake build) delete their half-written
+      # output on TERM but not on KILL, and a truncated object file with
+      # a fresh mtime would look up to date to the next make.
       - name: Stop leftover build processes (red run)
         if: failure() && steps.target-cache.outcome == 'success' && steps.target-cache.outputs.cache-hit != 'true' && steps.sweep.outcome == 'skipped' && github.event_name != 'pull_request'
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Windows ]; then
-            for p in cargo.exe cargo-nextest.exe rustc.exe build-script-build.exe cl.exe link.exe lld-link.exe cmake.exe; do
-              taskkill //F //T //IM "$p" >/dev/null 2>&1 || true
-            done
+            names="cargo.exe cargo-nextest.exe rustc.exe build-script-build.exe cl.exe link.exe lld-link.exe cmake.exe"
+            for p in $names; do taskkill //T //IM "$p" >/dev/null 2>&1 || true; done
+            sleep 10
+            for p in $names; do taskkill //F //T //IM "$p" >/dev/null 2>&1 || true; done
           else
-            pkill -9 -x 'cargo|cargo-nextest|rustc|build-script-build|cc|c\+\+|cc1|cc1plus|as|ld|ld\.lld|clang|cmake|make' || true
+            names='cargo|cargo-nextest|rustc|build-script-build|cc|c\+\+|cc1|cc1plus|as|ld|ld\.lld|clang|cmake|make'
+            pkill -TERM -x "$names" || true
+            sleep 10
+            pkill -KILL -x "$names" || true
           fi
-          sleep 5
+          sleep 2
 
       - name: Save partial target/ (red run, unswept)
         if: failure() && steps.target-cache.outcome == 'success' && steps.target-cache.outputs.cache-hit != 'true' && steps.sweep.outcome == 'skipped' && github.event_name != 'pull_request'
