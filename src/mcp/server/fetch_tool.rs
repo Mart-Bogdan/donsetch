@@ -690,6 +690,29 @@ async fn adapter_fallback(
     why: &str,
 ) -> Value {
     trace.step("adapter", action, why, 0);
+    // #291: a refused reddit `.json` hop is not the page's fate.
+    // One navigation through the legacy host first (body unused):
+    // it initializes the reddit.com session cookies the caller's
+    // host needs before it serves its real SSR page instead of the
+    // JS shell, and on some networks it serves content directly.
+    // The retry below then serves the content, with the session in
+    // the jar. Live A/B: without the hop the retry got an 8.5 KB
+    // shell (257 chars); with it, the 1 MB SSR page (1551 chars,
+    // post body).
+    if let Some(oldu) = url::Url::parse(orig_url)
+        .ok()
+        .and_then(|u| crate::adapters::reddit_old_json_variant(&u))
+    {
+        let t0 = std::time::Instant::now();
+        let hop = daemon.fetcher.fetch_persona(&oldu, None).await;
+        let status = hop.as_ref().map_or(0, |o| o.status);
+        trace.step(
+            "1",
+            "reddit-old-hop",
+            &format!("status={status}"),
+            t0.elapsed().as_millis(),
+        );
+    }
     let prior = match trace.value() {
         Value::Array(a) => a,
         _ => Vec::new(),
@@ -1077,6 +1100,14 @@ pub(super) async fn fetch_single_inner(daemon: &Arc<Daemon>, args: &Value, url: 
             // visitor, not a fresh jar every run.
             state.sync_tier1_cookies(&daemon.fetcher.jar_all_snapshot().await);
             match o.verdict {
+                // An adapter endpoint's refusal is not evidence about
+                // the PAGE (reddit's protected `.json` is the known
+                // case, #291): recording it as a domain wall routed
+                // the fallback retry, and every later fetch, around
+                // tier 1 entirely. The fallback below re-probes the
+                // caller's URL itself; its own verdict is what
+                // records a wall.
+                Verdict::Challenge(_) if adapter_host => {}
                 Verdict::Challenge(_) => {
                     state.record_failure(&host, crate::ghost::cache::FailClass::Block);
                     if is_warm {

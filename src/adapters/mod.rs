@@ -165,6 +165,26 @@ fn reddit_json_rw(u: &url::Url) -> Option<String> {
     Some(u2.to_string())
 }
 
+/// #291: the legacy-SSR variant of a reddit thread/listing URL
+/// (`old.reddit.com/...json`). Used by the fetch fallback: when
+/// reddit refuses its `.json` endpoint on the caller's host, one
+/// navigation through the legacy host restores what 4.2.x had : it
+/// serves content to some clients directly, and its page flow is
+/// what initializes the reddit.com session cookies (loid,
+/// session_tracker, csrf_token, token_v2) the caller's host needs
+/// before it serves the real SSR page instead of the JS shell.
+/// `None` = not a reddit thread/listing, or already on the legacy
+/// host.
+pub fn reddit_old_json_variant(u: &url::Url) -> Option<String> {
+    let json_url = reddit_json_rw(u)?;
+    let mut u2 = url::Url::parse(&json_url).ok()?;
+    if u2.host_str() == Some("old.reddit.com") {
+        return None;
+    }
+    u2.set_host(Some("old.reddit.com")).ok()?;
+    Some(u2.to_string())
+}
+
 fn npm_registry_rw(u: &url::Url) -> Option<String> {
     let host = u.host_str()?;
     if host != "www.npmjs.com" && host != "npmjs.com" {
@@ -371,6 +391,36 @@ mod tests {
         // wall (issue #283).
         assert!(rw("https://www.reddit.com/r/rust/comments/abc/x.json").is_none());
         assert!(rw("https://www.reddit.com/r/rust.json?limit=50").is_none());
+    }
+
+    // #291: the legacy-host variant exists only for URLs the JSON
+    // rewrite itself recognizes, and never points at the host the
+    // caller already chose.
+    #[test]
+    fn reddit_old_json_variant_targets_the_legacy_host() {
+        let v = |u: &str| reddit_old_json_variant(&url::Url::parse(u).unwrap());
+        assert_eq!(
+            v("https://www.reddit.com/r/rust/comments/abc123/title_here/?t=top").unwrap(),
+            "https://old.reddit.com/r/rust/comments/abc123/title_here.json?t=top"
+        );
+        assert_eq!(
+            v("https://reddit.com/r/programming").unwrap(),
+            "https://old.reddit.com/r/programming.json"
+        );
+        assert_eq!(
+            v("https://www.reddit.com/").unwrap(),
+            "https://old.reddit.com/.json"
+        );
+    }
+
+    #[test]
+    fn reddit_old_json_variant_is_none_elsewhere() {
+        let v = |u: &str| reddit_old_json_variant(&url::Url::parse(u).unwrap());
+        assert!(v("https://example.com/r/rust/comments/a/x/").is_none());
+        assert!(v("https://www.reddit.com/user/spez/").is_none());
+        assert!(v("https://old.reddit.com/r/rust/comments/abc/x/").is_none());
+        assert!(v("https://www.reddit.com/r/rust/comments/abc/x.json").is_none());
+        assert!(v("https://www.npmjs.com/package/react").is_none());
     }
 
     #[test]

@@ -5,6 +5,21 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Reddit threads returned a 257-char JS shell instead of the post
+  once their `.json` endpoint refused: the retry re-fetched the page
+  with no reddit session, and reddit answers that with a shell, so
+  the fetch looked thin and escalated or failed. A refused `.json`
+  hop no longer marks the domain walled, and the fallback makes one
+  navigation through the legacy host first, which restores the
+  reddit.com session cookies, then retries the caller's URL: the
+  real SSR page comes back (1333-1551 chars with the post body on a
+  live thread; listings too). When the `.json` endpoint answers,
+  the path is unchanged (#291).
+
 ## [4.3.1] - 2026-09-23
 
 ### Fixed
