@@ -437,6 +437,24 @@ jobs:
       # never re-saved, so a partial tree there would stick until the
       # dependencies change. The first green run after it saves the
       # swept exact entry. failure() is false on cancellation.
+      #
+      # A step that hits its timeout-minutes is stopped, but the
+      # compilers cargo started keep running and writing into target/;
+      # tar then refuses the tree ("file changed as we read it") and
+      # the save fails with only a warning. So stop them first.
+      - name: Stop leftover build processes (red run)
+        if: failure() && steps.target-cache.outcome == 'success' && steps.target-cache.outputs.cache-hit != 'true' && steps.sweep.outcome == 'skipped' && github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            for p in cargo.exe cargo-nextest.exe rustc.exe build-script-build.exe cl.exe link.exe lld-link.exe cmake.exe; do
+              taskkill //F //T //IM "$p" >/dev/null 2>&1 || true
+            done
+          else
+            pkill -9 -x 'cargo|cargo-nextest|rustc|build-script-build|cc|c\+\+|cc1|cc1plus|as|ld|ld\.lld|clang|cmake|make' || true
+          fi
+          sleep 5
+
       - name: Save partial target/ (red run, unswept)
         if: failure() && steps.target-cache.outcome == 'success' && steps.target-cache.outputs.cache-hit != 'true' && steps.sweep.outcome == 'skipped' && github.event_name != 'pull_request'
         uses: actions/cache/save@v6
