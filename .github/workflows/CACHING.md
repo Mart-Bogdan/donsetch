@@ -24,7 +24,7 @@ rust-cache does not manage `target/` because of how it cleans up after a fallbac
 ## The `target/` key
 
 ```
-tgt-<target triple>-<kind>-<rustc commit>-v1-<dependency hash>
+tgt-<target triple>-<kind>-<rustc commit>-v1-<dependency hash>-<workflow hash>
 ```
 
 - **target triple** separates the lanes.
@@ -32,8 +32,9 @@ tgt-<target triple>-<kind>-<rustc commit>-v1-<dependency hash>
 - **rustc commit** comes from `rustc -vV`. A new compiler invalidates every artifact, so there is nothing worth falling back to across compilers.
 - **v1** is a manual reset. Changing it forces every lane to start from nothing once.
 - **dependency hash** comes from `scripts/dep-hash.py`. It hashes `Cargo.lock` and every tracked `Cargo.toml`, parsed as TOML, with donsetch's own version and path-dependency versions zeroed and the workspace's own lockfile entries dropped. A release commit therefore keeps the same hash, while a real dependency, feature or profile change produces a new one. The files are read as UTF-8 explicitly: on the Windows runners Python otherwise decodes them with the cp1252 code page, and because the manifests contain non-ASCII text, Windows used to compute a different hash from every other lane.
+- **workflow hash** is a hash of `ci.yml` itself, with line endings normalized. What a lane builds is decided there: its features (the Windows lane alone builds two feature sets, one of them spelled out inside a step), cargo flags, environment and steps. Without this part, a change to how a lane builds would keep an exact hit on a tree built the old way; the lane would then recompile the difference on every run and never save a corrected entry. Any edit to the file, even a comment, produces a new key, but that only costs one fallback run per lane, as described next.
 
-The restore step tries, in order: the exact key; any key that starts with the exact key (this is how a `-partial-` entry from a failed run is found, see below); and finally any key with the same prefix up to `v1-`. When several entries match a prefix, GitHub restores the most recently created one, so after a dependency bump the previous dependency state is restored. Cargo's own per-unit hashes then decide what is reusable. A fallback can therefore cost restore time, but it can never produce a wrong build.
+The restore step tries, in order: the exact key; any key that starts with the exact key (this is how a `-partial-` entry from a failed run is found, see below); any key with the same dependency hash, which is the same dependencies under an older workflow; and finally any key with the same prefix up to `v1-`. When several entries match a prefix, GitHub restores the most recently created one, so after a dependency bump or a workflow change the previous state is restored. Cargo's own per-unit hashes then decide what is reusable. A fallback can therefore cost restore time, but it can never produce a wrong build.
 
 ## Keeping the cache bounded: the sweep
 
@@ -81,10 +82,10 @@ Release runs on a tag restore but never save (`release.yml`). A run for one tag 
 
 An exact hit skips the sweep and the save, so a stale entry stays until its key changes. To replace it:
 
+- **Change `ci.yml`.** Any edit changes the workflow hash, so every lane falls back to its previous entry, recompiles what changed, sweeps and saves a fresh entry. This is the cheap refresh, and it happens anyway whenever the workflow changes.
 - **Bump `v1` in the key.** Every lane starts from nothing once.
 - **Delete the entry** (`gh cache delete <key>`). The next run falls back to the newest older entry with the same prefix, or starts from nothing if there is none, then sweeps and saves.
 
 ## Known gaps
 
-- The lane's feature flags are not part of the key yet. Changing a lane's `features` keeps an exact hit on a tree built with other features, so that lane recompiles the difference on every run and never saves a corrected entry. Until that is fixed, bump `v1` after changing a lane's features.
 - On Windows, the release-feature gate recompiles `ort-sys` and the crates above it on every run, even on an exact hit. The cause is not known yet.

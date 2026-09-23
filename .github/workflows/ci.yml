@@ -237,20 +237,31 @@ jobs:
           fi
           echo "CACHE_KIND=$KIND" >> "$GITHUB_ENV"
 
-      # target/ key: tgt-<target>-<kind>-<rustc>-v1-<DEP_HASH>.
+      # target/ key: tgt-<target>-<kind>-<rustc>-v1-<DEP_HASH>-<WF_HASH>.
       # Everything before DEP_HASH makes old artifacts useless (another
       # target, build shape or compiler), so the fallback prefix stops
       # there: on a key miss, GitHub restores the NEWEST entry matching
-      # the prefix, i.e. the previous dependency state, and cargo's
-      # per-unit hashes decide what is reusable. A fallback can cost
-      # restore time, never correctness. Bump v1 to force a clean start.
+      # the prefix, i.e. the previous state, and cargo's per-unit hashes
+      # decide what is reusable. A fallback can cost restore time, never
+      # correctness. Bump v1 to force a clean start.
+      #
+      # WF_HASH is this file's hash. Features, flags, env and steps all
+      # live here (the windows lane alone builds two feature sets), and
+      # without it a change to what a lane builds would keep an exact
+      # hit on a tree built another way, recompile the difference on
+      # every run and never re-save. With it, such a change falls back
+      # to the previous entry, recompiles only what really changed,
+      # sweeps and saves. CRLF is normalized so a Windows checkout
+      # hashes the same bytes.
       - name: Compute target/ cache key
         shell: bash
         run: |
           RUSTC=$(rustc -vV | sed -n 's/^commit-hash: //p' | cut -c1-9)
+          WF_HASH=$(python3 -c "import hashlib; print(hashlib.sha256(open('.github/workflows/ci.yml', 'rb').read().replace(b'\r\n', b'\n')).hexdigest()[:8])")
           PREFIX="tgt-${{ matrix.target }}-${CACHE_KIND}-${RUSTC}-v1-"
           echo "TARGET_CACHE_PREFIX=$PREFIX" >> "$GITHUB_ENV"
-          echo "TARGET_CACHE_KEY=${PREFIX}${DEP_HASH}" >> "$GITHUB_ENV"
+          echo "TARGET_CACHE_DEPS_PREFIX=${PREFIX}${DEP_HASH}-" >> "$GITHUB_ENV"
+          echo "TARGET_CACHE_KEY=${PREFIX}${DEP_HASH}-${WF_HASH}" >> "$GITHUB_ENV"
 
       # Measured 2026-09 (restore vs fetching the index, the quiche git
       # fork and every crate from nothing): windows 19 s vs 37 s,
@@ -289,8 +300,9 @@ jobs:
           fsutil.exe behavior query disablelastaccess | tee lastaccess.txt
           grep -q 'Updates ENABLED' lastaccess.txt
 
-      # restore-keys: first the same dependency state (this picks up a
-      # `-partial-` entry left by a red run), then any older state.
+      # restore-keys, most specific first: the same key (this picks up a
+      # `-partial-` entry left by a red run), then the same dependencies
+      # under an older workflow, then any older state.
       - name: Restore target/
         id: target-cache
         uses: actions/cache/restore@v6
@@ -299,6 +311,7 @@ jobs:
           key: ${{ env.TARGET_CACHE_KEY }}
           restore-keys: |
             ${{ env.TARGET_CACHE_KEY }}
+            ${{ env.TARGET_CACHE_DEPS_PREFIX }}
             ${{ env.TARGET_CACHE_PREFIX }}
 
       # The sweep before saving keeps a unit only if one of its
