@@ -18,9 +18,18 @@ pub fn extract(html: &str, url: &str, opts: &ExtractOptions) -> Option<Extracted
     if !host.ends_with(".wikipedia.org") {
         return None;
     }
-    // Article pages only (/wiki/<title>, not /wiki/Special:...).
+    // Article pages only (/wiki/<title>). A colon inside a title is
+    // fine ("Star Trek: The Original Series" is an article); a
+    // NAMESPACE prefix (File:, Talk:, Special:, ...) is not. The
+    // old blanket `contains(':')` skipped every colon-titled
+    // article's infobox.
     let title = u.path().strip_prefix("/wiki/")?;
-    if title.is_empty() || title.contains(':') || u.path().contains("Special:") {
+    if title.is_empty() {
+        return None;
+    }
+    if let Some((prefix, _)) = title.split_once(':')
+        && is_namespace(prefix)
+    {
         return None;
     }
 
@@ -109,6 +118,42 @@ pub fn extract(html: &str, url: &str, opts: &ExtractOptions) -> Option<Extracted
         fingerprint: None,
         via: Some("adapter:wikipedia-infobox"),
     })
+}
+
+/// The MediaWiki namespace prefixes that are never articles
+/// (case-insensitive: `file:` and `File:` name the same namespace).
+fn is_namespace(prefix: &str) -> bool {
+    const NS: [&str; 28] = [
+        "media",
+        "special",
+        "talk",
+        "user",
+        "user talk",
+        "wikipedia",
+        "wikipedia talk",
+        "file",
+        "file talk",
+        "mediawiki",
+        "mediawiki talk",
+        "template",
+        "template talk",
+        "help",
+        "help talk",
+        "category",
+        "category talk",
+        "portal",
+        "portal talk",
+        "draft",
+        "draft talk",
+        "timedtext",
+        "module",
+        "module talk",
+        "gadget",
+        "gadget definition",
+        "book",
+        "education program",
+    ];
+    NS.contains(&prefix.to_lowercase().as_str())
 }
 
 /// Field value: text + links made readable ("Berlin, Germany"),
@@ -325,6 +370,29 @@ mod tests {
         // No infobox → no adapter.
         let plain = "<html><body><div class='mw-parser-output'><p>text</p></div></body></html>";
         assert!(extract(plain, "https://en.wikipedia.org/wiki/Plain", &opts()).is_none());
+    }
+
+    // A colon in an article title is not a namespace: the blanket
+    // check skipped every such article's infobox.
+    #[test]
+    fn colon_articles_keep_the_infobox_namespaces_do_not() {
+        let ex = extract(
+            WIKI,
+            "https://en.wikipedia.org/wiki/Star_Trek:_The_Original_Series",
+            &opts(),
+        )
+        .expect("colon titles are articles");
+        assert!(ex.markdown.contains("## Infobox"));
+        for ns in [
+            "Talk:Rust",
+            "File:Example.jpg",
+            "Category:Programming_languages",
+            "Wikipedia:About",
+            "Special:Search",
+        ] {
+            let url = format!("https://en.wikipedia.org/wiki/{ns}");
+            assert!(extract(WIKI, &url, &opts()).is_none(), "{ns}");
+        }
     }
 
     #[test]

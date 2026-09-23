@@ -19,7 +19,7 @@ const MAX_DEPTH: usize = 8;
 /// caller's host, issue #283).
 pub fn extract(body: &[u8], url: &str, opts: &ExtractOptions) -> Option<Extracted> {
     let host = url::Url::parse(url).ok()?.host_str()?.to_string();
-    if !host.ends_with("reddit.com") {
+    if !crate::adapters::is_reddit_host(&host) {
         return None;
     }
     let v: Value = serde_json::from_slice(body).ok()?;
@@ -429,6 +429,16 @@ mod tests {
             extract(
                 THREAD.as_bytes(),
                 "https://registry.npmjs.org/react",
+                &opts()
+            )
+            .is_none()
+        );
+        // Look-alike domains are not reddit (a bare suffix check
+        // used to claim them).
+        assert!(
+            extract(
+                THREAD.as_bytes(),
+                "https://notreddit.com/r/rust/comments/abc/x.json",
                 &opts()
             )
             .is_none()

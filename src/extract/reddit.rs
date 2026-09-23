@@ -28,7 +28,7 @@ pub fn extract(html: &str, url: &str, opts: &ExtractOptions) -> Option<Extracted
 
     let parsed = url::Url::parse(url).ok()?;
     let host = parsed.host_str()?.to_string();
-    if !host.ends_with("reddit.com") {
+    if !crate::adapters::is_reddit_host(&host) {
         return None;
     }
 
@@ -584,5 +584,31 @@ mod depth_tests {
             .join()
             .expect("the renderer must return, not overflow");
         assert!(done, "the reddit adapter still claims the page");
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    // A bare `ends_with("reddit.com")` claimed look-alike domains.
+    #[test]
+    fn look_alike_domains_are_not_reddit() {
+        let opts = ExtractOptions::default();
+        let html = r#"<html><body><div class="thing link" data-author="a">
+          <a class="title">T</a><time class="live-timestamp">1h</time>
+          <div class="usertext-body"><div class="md"><p>body</p></div></div>
+        </div></body></html>"#;
+        // Positive control: the same page on a real reddit host.
+        assert!(extract(html, "https://www.reddit.com/r/rust/comments/abc/t/", &opts).is_some());
+        assert!(extract(html, "https://notreddit.com/r/rust/comments/abc/t/", &opts).is_none());
+        assert!(
+            extract(
+                html,
+                "https://reddit.com.evil.io/r/rust/comments/abc/t/",
+                &opts
+            )
+            .is_none()
+        );
     }
 }

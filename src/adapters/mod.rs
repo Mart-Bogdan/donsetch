@@ -185,6 +185,17 @@ pub fn reddit_old_json_variant(u: &url::Url) -> Option<String> {
     Some(u2.to_string())
 }
 
+/// Domain-label host check for reddit, shared by the JSON adapter
+/// and the HTML extractor: `reddit.com` itself or any `*.reddit.com`
+/// subdomain, nothing else. A bare `ends_with("reddit.com")` also
+/// claimed look-alikes like `notreddit.com`.
+pub(crate) fn is_reddit_host(host: &str) -> bool {
+    host == "reddit.com"
+        || host
+            .strip_suffix("reddit.com")
+            .is_some_and(|p| p.ends_with('.'))
+}
+
 fn npm_registry_rw(u: &url::Url) -> Option<String> {
     let host = u.host_str()?;
     if host != "www.npmjs.com" && host != "npmjs.com" {
@@ -278,6 +289,22 @@ fn go_proxy_rw(u: &url::Url) -> Option<String> {
     if !first.contains('.') || rest.chars().any(|c| c.is_uppercase()) {
         return None;
     }
+    // Version-pinned module (/module@v1.2.3): the module path is the
+    // part before the '@', and the proxy serves the same payload
+    // @latest does, pinned, under /@v/<version>.info. Sending the
+    // '@' through to @latest made the proxy read "module@v1.2.3"
+    // as the module name: 404, fallback, and the caller's page
+    // fetched anyway, one wasted hop later.
+    if let Some(at) = rest.find('@') {
+        let module = &rest[..at];
+        let ver = &rest[at + 1..];
+        if module.is_empty() || ver.is_empty() || ver.contains('/') || !ver.starts_with('v') {
+            return None;
+        }
+        let u2 =
+            url::Url::parse(&format!("https://proxy.golang.org/{module}/@v/{ver}.info")).ok()?;
+        return Some(u2.to_string());
+    }
     let u2 = url::Url::parse(&format!("https://proxy.golang.org/{rest}/@latest")).ok()?;
     Some(u2.to_string())
 }
@@ -308,12 +335,16 @@ pub fn extract_json(
     if !enabled() {
         return None;
     }
-    // Same cut contract as extract_html: focus/toc/must_contain/
-    // section are pipeline features the adapters don't reproduce.
-    // Without this guard, `must_contain` on an adapter-shaped URL
-    // (reddit, npm, PyPI...) silently handed the agent the FULL
-    // document instead of the promised MATCH/NO-MATCH probe.
-    if opts.focus.is_some() || opts.toc || opts.must_contain.is_some() || opts.section.is_some() {
+    // Cut contract, JSON edition: `must_contain` bails to the
+    // non-HTML probe in extract(), which serves it properly. focus /
+    // toc / section do NOT bail: the generic machinery for them
+    // runs on HTML blocks, a JSON payload has none, and bailing
+    // fell through to the raw-JSON passthrough, which silently
+    // dropped the cut and dumped the whole payload. The card IS
+    // the compact truth of this endpoint: serve it. (The HTML
+    // extract adapters keep their guards: there the generic path
+    // applies the cuts on the real DOM.)
+    if opts.must_contain.is_some() {
         return None;
     }
     let looks_json = ct.contains("json") || matches!(body.first(), Some(b'{') | Some(b'['));
@@ -479,5 +510,64 @@ mod tests {
     fn non_adapter_sites_pass_through() {
         assert!(rw("https://example.com/foo").is_none());
         assert!(rw("https://github.com/tokio-rs/tokio").is_none());
+    }
+
+    // pkg.go.dev version pins map to the proxy's pinned .info; the
+    // '@' used to ride along into @latest, whose 404 cost a full
+    // adapter detour.
+    #[test]
+    fn go_proxy_version_pinned() {
+        let (u, via) = rw("https://pkg.go.dev/github.com/gin-gonic/gin@v1.10.0").unwrap();
+        assert_eq!(
+            u,
+            "https://proxy.golang.org/github.com/gin-gonic/gin/@v/v1.10.0.info"
+        );
+        assert_eq!(via, "adapter:go-proxy");
+        // A malformed pin is not a proxy path: generic handles it.
+        assert!(rw("https://pkg.go.dev/github.com/gin-gonic/gin@nope").is_none());
+        assert!(rw("https://pkg.go.dev/github.com/gin-gonic/gin@v1.0.0/sub").is_none());
+    }
+
+    #[test]
+    fn reddit_host_check_is_label_aware() {
+        assert!(is_reddit_host("reddit.com"));
+        assert!(is_reddit_host("www.reddit.com"));
+        assert!(is_reddit_host("old.reddit.com"));
+        assert!(!is_reddit_host("notreddit.com"));
+        assert!(!is_reddit_host("reddit.com.evil.io"));
+    }
+
+    // focus / toc / section cannot be applied to a JSON payload: the
+    // extractors used to bail and the raw JSON got dumped, silently
+    // dropping the cut. The card is the answer now. must_contain
+    // still bails (the non-HTML probe serves it).
+    #[test]
+    fn json_cards_survive_cut_params() {
+        let body = br#"{"kind":"Listing","data":{"children":[{"kind":"t3","data":{
+          "title":"Post","subreddit":"rust","author":"a","score":1,
+          "created_utc":1755800000.0,"num_comments":0,"selftext":"","over_18":false}}]}}"#;
+        let url = "https://www.reddit.com/r/rust.json";
+        for cut in [
+            crate::extract::ExtractOptions {
+                focus: Some("post".into()),
+                ..Default::default()
+            },
+            crate::extract::ExtractOptions {
+                toc: true,
+                ..Default::default()
+            },
+            crate::extract::ExtractOptions {
+                section: Some("x".into()),
+                ..Default::default()
+            },
+        ] {
+            let ex = extract_json(body, "application/json", url, &cut).expect("card");
+            assert!(ex.markdown.contains("**Post**"), "{}", ex.markdown);
+        }
+        let probe = crate::extract::ExtractOptions {
+            must_contain: Some("Post".into()),
+            ..Default::default()
+        };
+        assert!(extract_json(body, "application/json", url, &probe).is_none());
     }
 }

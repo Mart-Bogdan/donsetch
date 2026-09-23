@@ -5,6 +5,48 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- pkg.go.dev URLs that pin a version (`/module@v1.2.3`) map to the
+  Go proxy's pinned `.info` endpoint now. The `@` used to ride along
+  into the `@latest` rewrite, which the proxy read as part of the
+  module name: every pinned page cost a 404, a fallback and a second
+  fetch of the page itself (1.9s of detour on a live probe; the
+  pinned card answers in one request, 247ms).
+- crates.io `/crates/<name>/versions` renders the versions card
+  (newest release, dates, yanked flags, total count) instead of
+  dumping the endpoint's raw JSON: a live page went from 16 KB of
+  JSON to a 500-char card.
+- Wikipedia articles whose titles contain a colon (`Star Trek: The
+  Original Series`) get the infobox treatment again. The old blanket
+  colon check read any colon as a namespace prefix and skipped the
+  adapter; namespace pages (File:, Talk:, Special:, ...) still skip.
+  Live: the same page lost 4k chars of spilled table markup and
+  gained the clean field list.
+- Stack Exchange host matching is label-aware now: `meta.*`
+  subdomains and `mathoverflow.net` are covered, and look-alikes
+  (`notstackoverflow.com`) are not.
+- The reddit extractors (JSON adapter and HTML) no longer claim
+  look-alike domains: `reddit.com` or `*.reddit.com`, nothing else.
+- GitHub releases and commits pages fire the adapter again. The
+  commits URL arm takes the ref segment (`/commits/master`, the
+  canonical link), the releases selector follows the 2025+
+  server-rendered markup, and the commits renderer reads the React
+  rows (data-testid hooks, sha from `data-commit-link`, dates from
+  the per-group titles, which are the only server-rendered dates).
+  Live: a 30-commit page came back as a titled list with authors,
+  dates and short shas, a releases page as `## vX.Y.Z : date` plus
+  its notes. The legacy markup stays as fallback.
+- Adapter JSON endpoints no longer dump raw JSON when focus, toc or
+  section is set: the card is served instead. The generic cut
+  machinery runs on HTML blocks, a JSON payload has none, and the
+  old bail fell through to the raw-JSON passthrough, silently
+  dropping the cut (a `crates.io/crates/serde --focus downloads`
+  fetch returned 16 KB of JSON). `must_contain` still runs as a
+  probe.
+
 ## [4.3.2] - 2026-09-23
 
 ### Fixed
