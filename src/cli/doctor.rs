@@ -1180,14 +1180,14 @@ fn check_onnx() -> CheckResult {
         // whose archive was never linked in fails here instead of
         // printing a success string (this exact probe would have
         // caught the v3.3.0 leak on Windows/macOS).
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             match crate::onnx::ensure_loaded() {
                 Ok(()) => CheckResult::Pass("static link, commit probe ok".into()),
                 Err(e) => CheckResult::Fail("ONNX payload probe failed".into(), e.to_string()),
             }
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             // Check AVX support (disk-cached).
             let has_avx = crate::cpu::has_avx();
@@ -1197,7 +1197,7 @@ fn check_onnx() -> CheckResult {
                 );
             }
             // Check shared library presence.
-            let lib_name = "libonnxruntime.so";
+            let lib_name = crate::onnx::shared_lib_name();
             let found = if let Ok(exe) = std::env::current_exe()
                 && let Some(parent) = exe.parent()
             {

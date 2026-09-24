@@ -5,6 +5,21 @@ All notable changes to DonSeTch are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `donsetch.exe` died at process start, with no output, on a CPU without
+  AVX (#277: a first-generation Core i7): ONNX Runtime was linked
+  statically and its global constructors run AVX before `main`. Windows
+  now loads ONNX Runtime the way Linux does, at runtime behind the CPUID
+  gate, from Microsoft's own `onnxruntime.dll` shipped beside the exe
+  (pinned by version and sha256 in the release workflow, CPU provider
+  only). On an old CPU OCR and rerank report "disabled" in `doctor` and
+  everything else works; the hard `DirectML.dll` import, which kept the
+  exe from starting on Server Core and pre-1903 Windows 10, is gone
+  with the static link. The self-updater carries the DLL across updates
+  like `pdfium.dll`.
+
 ## [4.3.3] - 2026-09-24
 
 ### Changed

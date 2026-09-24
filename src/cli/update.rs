@@ -14,7 +14,7 @@
 //!   4. Verify SHA256.
 //!   5. Extract (flate2 + tar).
 //!   6. Replace the binary in place (atomic on Unix, rename-then-
-//!      write on Windows). Also replaces pdfium.dll on Windows.
+//!      write on Windows). Also replaces pdfium.dll and onnxruntime.dll on Windows.
 //!   7. Clean up temp files and old backups.
 
 use std::path::Path;
@@ -332,7 +332,7 @@ fn extract_tarball(data: &[u8], dest: &Path) -> Result<Vec<String>, String> {
 ///
 /// **Windows**: the running `.exe` is locked against deletion but
 /// CAN be renamed. Rename to `.exe.bak`, write the new `.exe`.
-/// Also replaces `pdfium.dll` if the tarball includes it. Old
+/// Also replaces `pdfium.dll` and `onnxruntime.dll` if the tarball includes them. Old
 /// `.bak` files are cleaned up on the next update (see
 /// `cleanup_previous`).
 #[allow(clippy::needless_borrows_for_generic_args)]
@@ -470,13 +470,17 @@ fn replace_binary(exe: &Path, temp_dir: &Path) -> Result<(), String> {
         let _ = std::fs::write(exe_dir.join("donsetch.bak.ver"), env!("CARGO_PKG_VERSION"));
 
         // Copy pdfium.dll if present in the tarball.
-        let new_dll = temp_dir.join("pdfium.dll");
-        if new_dll.exists() {
-            let dll_path = exe_dir.join("pdfium.dll");
-            let dll_bak = exe_dir.join("pdfium.dll.bak");
-            let _ = std::fs::remove_file(&dll_bak);
-            let _ = std::fs::rename(&dll_path, &dll_bak);
-            let _ = std::fs::copy(&new_dll, &dll_path);
+        // The runtime DLLs the tarball ships beside the exe: pdfium,
+        // and since the dlopen switch (#277) ONNX Runtime too.
+        for name in ["pdfium.dll", "onnxruntime.dll"] {
+            let new_dll = temp_dir.join(name);
+            if new_dll.exists() {
+                let dll_path = exe_dir.join(name);
+                let dll_bak = exe_dir.join(format!("{name}.bak"));
+                let _ = std::fs::remove_file(&dll_bak);
+                let _ = std::fs::rename(&dll_path, &dll_bak);
+                let _ = std::fs::copy(&new_dll, &dll_path);
+            }
         }
     }
 
