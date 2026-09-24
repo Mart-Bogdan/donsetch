@@ -68,11 +68,13 @@
 //!
 //! So Windows now does what Linux does: `load-dynamic`, the DLL beside
 //! the exe, `find_shared_lib` + `cpu::has_avx()` before `init_from`.
-//! `release.yml` fetches the pinned Microsoft zip, verifies its sha256
-//! and packages `onnxruntime.dll` next to `donsetch.exe` and `pdfium.dll`;
-//! the self-updater carries it across updates like `pdfium.dll`. Any ORT
-//! release at or above the `api-N` feature's version satisfies `GetApi`,
-//! so the pin can move forward without touching the crate.
+//! `build.rs` fetches the pinned Microsoft zip, verifies its sha256 and
+//! places `onnxruntime.dll` beside every build's exe (dev builds too, the
+//! same `fetch_onnx_prebuilt` path as the Linux `.so`); `release.yml`
+//! packages it next to `donsetch.exe` and `pdfium.dll`, and the
+//! self-updater carries it across updates like `pdfium.dll`. Any ORT
+//! release at or above the `api-N` feature's version satisfies
+//! `GetApi`, so the pin can move forward without touching the crate.
 //!
 //! What this removed: the hard `DirectML.dll` import (the static archive
 //! was built with the DirectML provider, so `ort-sys` emitted the link

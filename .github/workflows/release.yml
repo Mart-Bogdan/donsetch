@@ -154,42 +154,19 @@ jobs:
           # x86_64: target the baseline ISA (SSE2, no AVX) so Rust
           # code runs on QEMU-emulated x86_64 and older CPUs.
           # ONNX Runtime AVX is handled separately via dynamic loading
-          # (ort load-dynamic + a runtime AVX gate; Linux builds the
-          # .so at compile time, Windows ships Microsoft's DLL, fetched
-          # below).
+          # (ort load-dynamic + a runtime AVX gate; build.rs fetches
+          # Microsoft's shared library for Linux and Windows).
           # Linux legs also pin -fuse-ld=lld per matrix.rustflags:
           # bfd 2.38 (22.04) cannot link rustc 1.98 output (.crel).
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --locked ${{ matrix.features }} --target ${{ matrix.target }}
         timeout-minutes: 30
 
-      # Windows loads ONNX Runtime at runtime behind the AVX gate, the
-      # same as Linux (#277: the static link ran AVX in global
-      # constructors before main and killed the exe at start on a
-      # CPU without AVX). The DLL is Microsoft's own release build
-      # (CPU provider only, no DirectML import), pinned by version and
-      # sha256; any release at or above the crate's api-N feature
-      # satisfies GetApi, so moving the pin forward needs no code.
-      - name: Fetch ONNX Runtime DLL (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: powershell
-        env:
-          ORT_VERSION: "1.30.0"
-          ORT_SHA256: "c6ba983baf5681af108599675d2a89c2d145512d02de28aed0bff177cd0ba949"
-        run: |
-          $ErrorActionPreference = "Stop"
-          $zip = "onnxruntime-win-x64-$env:ORT_VERSION.zip"
-          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$env:ORT_VERSION/$zip"
-          Invoke-WebRequest -Uri $url -OutFile $zip
-          $got = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-          if ($got -ne $env:ORT_SHA256) {
-            Write-Error "onnxruntime zip sha256 mismatch: got $got, pinned $env:ORT_SHA256"
-          }
-          Expand-Archive -Path $zip -DestinationPath ort-unpack -Force
-          $dll = Get-ChildItem -Path ort-unpack -Recurse -Filter onnxruntime.dll | Select-Object -First 1
-          if (-not $dll) { Write-Error "onnxruntime.dll not found in $zip" }
-          Copy-Item $dll.FullName "target\${{ matrix.target }}\release\onnxruntime.dll"
-          Get-Item "target\${{ matrix.target }}\release\onnxruntime.dll" | Format-List Name, Length
+      # Windows loads ONNX Runtime at runtime like Linux (#277, #298).
+      # build.rs fetches Microsoft's pinned, sha256-verified release
+      # zip and places onnxruntime.dll beside the exe for every build,
+      # dev included; the payload gate and the package step below
+      # require it.
 
       # NOTE: no in-tree release-mode test sweep here anymore — it
       # re-linked test binaries with fat LTO (~15 min) to re-derive
@@ -334,9 +311,9 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          # Include ONNX shared lib if present (Linux x64, built for
-          # runtime dlopen). macOS links statically; Windows packages
-          # its DLL in the step below.
+          # Include ONNX shared lib if present (Linux x64, fetched by
+          # build.rs for runtime dlopen). macOS links statically;
+          # Windows packages its DLL in the step below.
           if [ -f libonnxruntime.so ]; then
             tar czf $GITHUB_WORKSPACE/donsetch-${{ matrix.name }}.tar.gz donsetch libonnxruntime.so
           else
@@ -353,7 +330,7 @@ jobs:
             exit 1
           )
           if not exist onnxruntime.dll (
-            echo ERROR: onnxruntime.dll not found - fetch step failed
+            echo ERROR: onnxruntime.dll not found - build.rs copy failed
             exit 1
           )
           tar czf %GITHUB_WORKSPACE%\donsetch-${{ matrix.name }}.tar.gz donsetch.exe pdfium.dll onnxruntime.dll
