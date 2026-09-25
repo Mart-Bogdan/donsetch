@@ -1189,13 +1189,14 @@ fn check_onnx() -> CheckResult {
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
-            // Check AVX support (disk-cached).
+            // AVX is a diagnostic, not a gate: the shipped runtime
+            // dispatches its kernels at runtime and runs on SSE4.2.
             let has_avx = crate::cpu::has_avx();
-            if !has_avx {
-                return CheckResult::Warn(
-                    "CPU lacks AVX : OCR and rerank disabled (all other features work)".into(),
-                );
-            }
+            let cpu = if has_avx {
+                "AVX detected"
+            } else {
+                "no AVX (SSE kernels)"
+            };
             // Check shared library presence.
             let lib_name = crate::onnx::shared_lib_name();
             let found = if let Ok(exe) = std::env::current_exe()
@@ -1206,12 +1207,24 @@ fn check_onnx() -> CheckResult {
                 false
             };
             let cache = paths::cache_dir().join("onnx").join(lib_name).exists();
-            if found || cache {
-                CheckResult::Pass("AVX detected, shared library present".into())
+            if !(found || cache) {
+                CheckResult::Warn(format!(
+                    "{cpu} but shared library missing : reinstall donsetch"
+                ))
             } else {
-                CheckResult::Warn(
-                    "AVX detected but shared library missing : reinstall donsetch".into(),
-                )
+                // Presence is not proof: the library must load and
+                // initialize. A text file dressed as onnxruntime.dll
+                // passed the old exists() check, which made the
+                // release workflow's no-AVX doctor run assert
+                // nothing about the runtime (review of #300). This
+                // is the same payload probe the macOS branch runs.
+                match crate::onnx::ensure_loaded() {
+                    Ok(()) => CheckResult::Pass(format!("{cpu}, shared library present")),
+                    Err(e) if e.contains("not found") => CheckResult::Warn(format!(
+                        "{cpu} but shared library missing : reinstall donsetch"
+                    )),
+                    Err(e) => CheckResult::Fail("ONNX payload probe failed".into(), e),
+                }
             }
         }
     }
