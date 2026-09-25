@@ -287,11 +287,13 @@ fn main() {
         env::var_os("CARGO_FEATURE_OCR").is_some() || env::var_os("CARGO_FEATURE_RERANK").is_some();
     if has_onnx {
         if let Some(info) = onnx_target_info(&os, &arch) {
-            // Linux x86_64: build shared lib for dynamic loading.
+            // Linux x86_64 / Windows x64: fetch Microsoft's shared
+            // library for dynamic loading and place it beside the
+            // binary (dev builds included, #298 review).
             fetch_onnx_prebuilt(info, &manifest);
         } else {
-            // macOS/Windows: ort crate uses download-binaries (static
-            // linking). No shared library build needed.
+            // macOS: ort crate uses download-binaries (static
+            // linking). No shared library needed.
             eprintln!("donsetch build: OCR/rerank enabled, ort static link for {os}-{arch}");
         }
     }
@@ -483,10 +485,20 @@ fn fetch_pdfium(os: &str, arch: &str, vendored: &Path) {
 struct OnnxTarget {
     url: &'static str,
     sha256: &'static str,
-    /// Path of the real shared library inside the tarball.
+    /// Path of the real shared library inside the archive.
     inner_lib: &'static str,
     /// File name we ship it as, next to the binary.
     shared_name: &'static str,
+    /// How Microsoft packaged this target's release.
+    archive: OnnxArchive,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnnxArchive {
+    /// `.tgz` (Linux): a gzip'd tar.
+    Tgz,
+    /// `.zip` (Windows).
+    Zip,
 }
 
 /// Return ONNX target info if a prebuilt is available for this platform.
@@ -494,12 +506,23 @@ struct OnnxTarget {
 /// macOS/Windows use static linking via the ort crate (no shared library
 /// build needed).
 fn onnx_target_info(os: &str, arch: &str) -> Option<OnnxTarget> {
-    let (url, sha256, inner_lib, shared_name) = match (os, arch) {
+    let (url, sha256, inner_lib, shared_name, archive) = match (os, arch) {
         ("linux", "x86_64") => (
             "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz",
             "43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6",
             "onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so.1.24.2",
             "libonnxruntime.so",
+            OnnxArchive::Tgz,
+        ),
+        // Windows x64: the same release, Microsoft's CPU-only build
+        // (no DirectML import). Loaded at runtime like the Linux .so
+        // (#277, #298); the exe no longer links ONNX statically.
+        ("windows", "x86_64") => (
+            "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-1.24.2.zip",
+            "8e3e9c826375352e29cb2614fe44f3d7a4b0ff7b8028ad7a456af9d949a7e8b0",
+            "onnxruntime-win-x64-1.24.2/lib/onnxruntime.dll",
+            "onnxruntime.dll",
+            OnnxArchive::Zip,
         ),
         // NOTE: onnxruntime-linux-aarch64-1.24.2 exists but dlopen'ing
         // it from this binary deadlocks inside the loader on native
@@ -515,13 +538,14 @@ fn onnx_target_info(os: &str, arch: &str) -> Option<OnnxTarget> {
         sha256,
         inner_lib,
         shared_name,
+        archive,
     })
 }
 
 /// Download the official ONNX Runtime prebuilt, verify its SHA256, and
 /// copy it next to the binary for runtime dlopen. Used for Linux x86_64
-/// and aarch64: the ort-sys static relink is gone, so builds no longer
-/// need a working C toolchain or pay a 110MB static extraction.
+/// and Windows x64: the ort-sys static relink is gone, so builds no
+/// longer need a working C toolchain or pay a 110MB static extraction.
 fn fetch_onnx_prebuilt(info: OnnxTarget, manifest: &Path) {
     let vendored = manifest.join("vendor").join("onnx");
     let _ = fs::create_dir_all(&vendored);
@@ -538,8 +562,11 @@ fn fetch_onnx_prebuilt(info: OnnxTarget, manifest: &Path) {
         return;
     }
 
-    // 1. Download the tarball.
-    let tarball = vendored.join("onnx.tgz");
+    // 1. Download the archive.
+    let tarball = vendored.join(match info.archive {
+        OnnxArchive::Tgz => "onnx.tgz",
+        OnnxArchive::Zip => "onnx.zip",
+    });
     eprintln!("donsetch build: fetching ONNX Runtime from {}", info.url);
     let status = Command::new("curl")
         .args([
@@ -571,26 +598,41 @@ fn fetch_onnx_prebuilt(info: OnnxTarget, manifest: &Path) {
         info.sha256, got
     );
 
-    // 3. Extract the shared library from the plain tar.gz archive.
-    let entry = extract_tarball_entry(&buf, info.inner_lib)
-        .unwrap_or_else(|| panic!("ONNX: {} not found in tarball", info.inner_lib));
+    // 3. Extract the shared library from the archive.
+    let entry = match info.archive {
+        OnnxArchive::Tgz => extract_tarball_entry(&buf, info.inner_lib),
+        OnnxArchive::Zip => extract_zip_entry(&buf, info.inner_lib),
+    }
+    .unwrap_or_else(|| panic!("ONNX: {} not found in archive", info.inner_lib));
     fs::write(&shared_path, &entry).expect("ONNX: cannot write shared lib");
 
-    // 4. Sanity: the file must be a plausible ELF shared object.
+    // 4. Sanity: the file must be a plausible shared library of the
+    // archive's kind (ELF for the .so, PE for the DLL).
     assert!(
         entry.len() > 10 * 1024 * 1024,
         "ONNX: extracted lib is implausibly small ({} bytes)",
         entry.len()
     );
-    assert!(
-        &entry[..4] == b"\x7fELF",
-        "ONNX: extracted file is not an ELF library"
-    );
+    let magic_ok = match info.archive {
+        OnnxArchive::Tgz => &entry[..4] == b"\x7fELF",
+        OnnxArchive::Zip => &entry[..2] == b"MZ",
+    };
+    assert!(magic_ok, "ONNX: extracted file is not a shared library");
 
     let _ = fs::remove_file(&tarball);
 
     // 5. Copy to output directories.
     copy_onnx_shared_lib(&shared_path);
+}
+
+/// Extract one entry from a zip archive (Microsoft's Windows release).
+fn extract_zip_entry(data: &[u8], wanted: &str) -> Option<Vec<u8>> {
+    let cursor = std::io::Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(cursor).ok()?;
+    let mut file = archive.by_name(wanted).ok()?;
+    let mut out = Vec::with_capacity(file.size() as usize);
+    file.read_to_end(&mut out).ok()?;
+    Some(out)
 }
 
 /// Extract one entry from a gzip-compressed tar archive (plain
