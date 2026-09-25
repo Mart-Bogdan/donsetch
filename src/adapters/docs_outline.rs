@@ -102,34 +102,36 @@ pub fn extract(html: &str, url: &str, opts: &ExtractOptions) -> Option<Extracted
             }
         }
     }
-    for el in root.select(&any_sel) {
-        let is_div = el.value().name() == "div";
-        // Descendant select: a <p> inside a <li> or <blockquote>,
-        // a nested <ul>, would be emitted as part of its parent
-        // AND again on its own. Outermost matches only. A div is
-        // covered by an outer div only when that one is also a
-        // candidate (#293).
-        let nested = el
-            .ancestors()
-            .take_while(|a| a.id() != root.id())
-            .filter_map(ElementRef::wrap)
-            .any(|a| {
-                block_sel.matches(&a)
-                    || (is_div && a.value().name() == "div" && !has_block.contains(&a.id()))
-            });
-        if nested {
+    // #304: one pre-order walk, not "every candidate walks every
+    // ancestor". The walk descends only through wrapper divs and
+    // non-candidate containers; an element it emits (or a plain div
+    // it covers) has its subtree skipped, which is exactly what the
+    // ancestor rule decided, once per element instead of once per
+    // ancestor. 5 000 leaf divs under 4 000 wrapper divs paid a
+    // 4 000-ancestor check each (~40 s on the debug profile, a
+    // ~104 KB page); this walk visits every node once.
+    let mut stack: Vec<ElementRef> = root.children().filter_map(ElementRef::wrap).rev().collect();
+    while let Some(el) = stack.pop() {
+        if !any_sel.matches(&el) {
+            // A container the adapter does not render: descend.
+            stack.extend(el.children().filter_map(ElementRef::wrap).rev());
             continue;
         }
+        let is_div = el.value().name() == "div";
         if is_div {
             // A wrapper holding block elements is skipped: its
-            // blocks emit on their own.
+            // blocks emit on their own and the walk descends into
+            // it. A plain div renders its own markdown and covers
+            // every descendant.
             if !has_block.contains(&el.id()) {
                 let (m, _) = crate::extract::inline::markdown(el, url, &body_opts);
                 if !m.trim().is_empty() {
                     body.push_str(m.trim());
                     body.push_str("\n\n");
                 }
+                continue;
             }
+            stack.extend(el.children().filter_map(ElementRef::wrap).rev());
             continue;
         }
         match el.value().name() {
@@ -324,6 +326,36 @@ mod tests {
         );
         // The first page (16 000 chars by default) is all leaf
         // paragraphs; the closing <p> sits on a later page.
+        let xs = ex.markdown.matches("x\n").count();
+        assert!(xs >= 1_000, "the leaf divs are content: {xs} of {n}");
+    }
+
+    // #304: the ancestor walk itself, not just the wrapper scan. With
+    // the wrapper set precomputed, every candidate still walked its
+    // whole ancestor chain (selector match + set lookup per level),
+    // so D wrapper divs around N leaf divs cost about N*D steps. On
+    // this box's fast profile the pre-fix walk measured 11.4 s at
+    // 5 000 leaves and 24.4 s at 16 000 (this test, against the 20 s
+    // bound) where the single walk takes 0.37 s and 1.1 s.
+    #[test]
+    fn deep_wrappers_with_many_leaf_divs_walk_once() {
+        let nav: String = (0..5)
+            .map(|i| format!(r#"<a class="menu__link" href="/d/{i}/">D{i}</a>"#))
+            .collect();
+        let (depth, n) = (4_000, 16_000);
+        let page = format!(
+            r#"<html><body><div id="__docusaurus"><nav>{nav}</nav>{}{}<p>end</p>{}</div></body></html>"#,
+            "<div>".repeat(depth),
+            "<div>x</div>".repeat(n),
+            "</div>".repeat(depth),
+        );
+        let started = std::time::Instant::now();
+        let ex = extract(&page, "https://docs.example.com/", &opts()).unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "took {:?}",
+            started.elapsed()
+        );
         let xs = ex.markdown.matches("x\n").count();
         assert!(xs >= 1_000, "the leaf divs are content: {xs} of {n}");
     }

@@ -61,6 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quadratic in the leaf count (20 000 leaf divs, a 240 KB page, ran
   for minutes). The set of elements with a block descendant is built
   once, in one pass. (mnaza, #303)
+- The docs-outline nesting check no longer walks every ancestor of
+  every candidate: "nested" is now one pre-order walk's own
+  bookkeeping, descending only through wrapper divs and non-candidate
+  containers and skipping the subtree of anything it emits. 16 000
+  leaf divs under 4 000 wrapper divs went from 24.4 s (over the test
+  bound) to 1.1 s on the fast profile (#304).
 
 ## [4.3.3] - 2026-09-24
 
