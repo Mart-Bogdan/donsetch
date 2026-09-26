@@ -3,11 +3,12 @@
 //! unversioned (`U1__…`), the kind that tolerates out-of-order merges.
 
 use super::{ProbeResult, touch};
+use refinery::Report;
 
 refinery::embed_migrations!("src/sqlite_probe/refinery_migrations");
 
 pub fn run(conn: &mut rusqlite::Connection) -> ProbeResult<()> {
-    let report = migrations::runner().run(conn)?;
+    let report: Report = migrations::runner().run(conn)?;
     let applied: Vec<String> = report
         .applied_migrations()
         .iter()

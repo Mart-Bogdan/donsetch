@@ -1,0 +1,3 @@
+﻿CREATE TABLE probe_bom (
+    id INTEGER PRIMARY KEY
+);
