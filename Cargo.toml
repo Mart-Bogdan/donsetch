@@ -60,6 +60,13 @@ psl = { version = "=2.1.235" }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"], optional = true }
 ndarray = { version = "0.17", optional = true }
 num_cpus = { version = "1.17", optional = true }
+# SQLite migration size probe (throwaway experiment, not for upstream).
+# rusqlite is pinned to 0.39: refinery 0.9.2 accepts rusqlite <=0.39, and
+# rusqlite_migration 2.5.0 is its last release on 0.39, so both variants
+# link the same SQLite.
+rusqlite = { version = "=0.39.0", features = ["bundled"], optional = true }
+refinery = { version = "=0.9.2", default-features = false, features = ["rusqlite"], optional = true }
+rusqlite_migration = { version = "=2.5.0", optional = true }
 
 # Linux and Windows: dlopen'd at runtime — the prebuilt static archive runs
 # unguarded AVX in global constructors and SIGILLs pre-`main` on non-AVX CPUs
@@ -85,6 +92,10 @@ default = []
 ocr = ["dep:oar-ocr", "dep:image", "reqwest/blocking"]
 rerank = ["dep:ort", "dep:tokenizers", "dep:ndarray", "dep:num_cpus", "reqwest/blocking"]
 http = ["dep:axum", "dep:tower-http"]
+# SQLite migration size probe (throwaway experiment, not for upstream).
+sqlite = ["dep:rusqlite"]
+refinery = ["sqlite", "dep:refinery"]
+rusqlite_migration = ["sqlite", "dep:rusqlite_migration"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_Foundation", "Win32_System_Console", "Win32_System_Registry", "Win32_System_Pipes"] }

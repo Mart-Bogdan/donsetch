@@ -3,6 +3,9 @@ use donsetch::config;
 use donsetch::dev;
 use donsetch::mcp;
 
+#[cfg(feature = "sqlite")]
+mod sqlite_probe;
+
 /// Load the layered config, apply CLI overrides, install it process-wide.
 /// Fatal on any config error: a bad knob must stop the daemon loudly.
 fn load_and_install_config(args: &[String]) -> &'static config::DonsetchConfig {
@@ -82,6 +85,15 @@ fn config_cli(args: &[String]) {
 const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 fn main() {
+    // Throwaway SQLite size probe. Branching on a runtime argument keeps
+    // both this path and the whole normal program linked.
+    #[cfg(feature = "sqlite")]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some("sqlite-probe") {
+            std::process::exit(sqlite_probe::main(args.get(2).map(String::as_str)));
+        }
+    }
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(WORKER_STACK_BYTES)
